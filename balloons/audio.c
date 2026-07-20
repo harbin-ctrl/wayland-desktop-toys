@@ -93,6 +93,7 @@ static pthread_t g_synth_thread;
 static bool g_synth_thread_running = false;
 static bool g_synth_quit = false;
 static bool g_synth_pregen_pending = false;
+static int g_synth_trace = 0;
 
 typedef struct {
     bool valid;
@@ -583,6 +584,9 @@ static void *synth_thread_main(void *arg) {
         g_whoosh_job.valid = false;
         pthread_mutex_unlock(&g_synth_queue_lock);
 
+        struct timespec t0 = {0}, t1 = {0};
+        if (g_synth_trace) clock_gettime(CLOCK_MONOTONIC, &t0);
+
         int length = (int)((job.duration + WHOOSH_TAIL_SECONDS) * SAMPLE_RATE);
         if (length > WHOOSH_CAPACITY_SAMPLES) {
             length = WHOOSH_CAPACITY_SAMPLES;
@@ -607,6 +611,14 @@ static void *synth_thread_main(void *arg) {
         audio_state.whoosh.length = length;
         audio_unlock();
         start_voice(&audio_state.whoosh, 1.0f);
+
+        if (g_synth_trace) {
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            fprintf(stderr, "[audio] whoosh synth %.1f ms (gust=%d, %.1fs)\n",
+                    (t1.tv_sec - t0.tv_sec) * 1e3 +
+                    (t1.tv_nsec - t0.tv_nsec) * 1e-6,
+                    job.is_gust, job.duration);
+        }
 
         if (job.is_gust) {
             float latency = output_latency_seconds();
@@ -778,6 +790,7 @@ bool audio_init(void) {
         return false;
     }
 
+    g_synth_trace = getenv("APNGO_TRACE") != NULL;
     if (pthread_create(&g_synth_thread, NULL, synth_thread_main, NULL) == 0) {
         g_synth_thread_running = true;
     } else {
