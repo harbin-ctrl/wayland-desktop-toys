@@ -270,15 +270,16 @@ static float g_target_peak_y = TARGET_PEAK_Y;
 static uint8_t g_color_light_rgb[3] = { COLOR_LIGHT_R, COLOR_LIGHT_G, COLOR_LIGHT_B };
 static uint8_t g_color_dark_rgb[3] = { COLOR_DARK_R, COLOR_DARK_G, COLOR_DARK_B };
 static uint8_t g_grid_color_rgb[3] = { GRID_COLOR_R, GRID_COLOR_G, GRID_COLOR_B };
+static uint32_t g_color_drop_light[POINGO_MENU_DISC * POINGO_MENU_DISC];
+static uint32_t g_color_drop_dark[POINGO_MENU_DISC * POINGO_MENU_DISC];
 
 static void poingo_menu_set_drop(int slot, const uint8_t rgb[3]) {
     if (!g_menu) return;
-    uint32_t *img = ringmenu_color_drop(rgb[0], rgb[1], rgb[2], slot,
-                                        POINGO_MENU_ITEMS, POINGO_MENU_DISC);
-    if (img) {
+    uint32_t *img = slot == 0 ? g_color_drop_light : g_color_drop_dark;
+    if (ringmenu_color_drop_into(img, POINGO_MENU_DISC * POINGO_MENU_DISC,
+                                 rgb[0], rgb[1], rgb[2], slot,
+                                 POINGO_MENU_ITEMS, POINGO_MENU_DISC))
         ringmenu_update_image(g_menu, slot, img);
-        free(img);
-    }
 }
 
 static void poingo_menu_sync_drops(void) {
@@ -5270,12 +5271,16 @@ static int run_freerange_wayland(bool start_muted) {
     }
     eglSwapInterval(st.egl_display, 0);
 
-    uint32_t *light_drop = ringmenu_color_drop(
-        g_color_light_rgb[0], g_color_light_rgb[1], g_color_light_rgb[2],
-        0, POINGO_MENU_ITEMS, POINGO_MENU_DISC);
-    uint32_t *dark_drop = ringmenu_color_drop(
-        g_color_dark_rgb[0], g_color_dark_rgb[1], g_color_dark_rgb[2],
-        1, POINGO_MENU_ITEMS, POINGO_MENU_DISC);
+    uint32_t *light_drop = g_color_drop_light;
+    uint32_t *dark_drop = g_color_drop_dark;
+    ringmenu_color_drop_into(light_drop, POINGO_MENU_DISC * POINGO_MENU_DISC,
+                             g_color_light_rgb[0], g_color_light_rgb[1],
+                             g_color_light_rgb[2], 0, POINGO_MENU_ITEMS,
+                             POINGO_MENU_DISC);
+    ringmenu_color_drop_into(dark_drop, POINGO_MENU_DISC * POINGO_MENU_DISC,
+                             g_color_dark_rgb[0], g_color_dark_rgb[1],
+                             g_color_dark_rgb[2], 1, POINGO_MENU_ITEMS,
+                             POINGO_MENU_DISC);
     RingMenuItem menu_items[POINGO_MENU_ITEMS] = {
         { .image = light_drop, .image_w = POINGO_MENU_DISC, .image_h = POINGO_MENU_DISC },
         { .image = dark_drop, .image_w = POINGO_MENU_DISC, .image_h = POINGO_MENU_DISC },
@@ -5289,8 +5294,6 @@ static int run_freerange_wayland(bool start_muted) {
     if (light_drop && dark_drop) {
         g_menu = ringmenu_create(menu_items, POINGO_MENU_ITEMS);
     }
-    free(light_drop);
-    free(dark_drop);
     if (g_menu) {
         int menu_size = ringmenu_size(g_menu);
         g_menu_scratch_cap = (size_t)menu_size * menu_size;
