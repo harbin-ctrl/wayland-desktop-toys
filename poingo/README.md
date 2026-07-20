@@ -13,7 +13,7 @@ audio paths.
   `wl_pointer`/`wl_keyboard` input, and `xkbcommon` for the keymap. No SDL, no
   toolkit.
 - Predictive audio scheduling for modern output latency.
-- Audio through cubeb; the shared mixer/DSP lives in `libtoyaudio`, the pie
+- Audio directly through PipeWire; the shared mixer/DSP lives in `libtoyaudio`, the pie
   menu in `libringmenu`.
 - A built-in `nostalgia mode`.
 
@@ -26,7 +26,7 @@ make          # builds ./bin/poingo
 ```
 
 Development packages: `wayland-client`, `wayland-egl`, `egl`, `glesv2`,
-`xkbcommon`, and `cubeb` (audio; without it the toy builds and runs silent).
+`xkbcommon`, and PipeWire (`libpipewire-0.3`; audio).
 Build and install through the Makefile targets. The project-wide package
 checklist is in `../list.todo`.
 
@@ -57,19 +57,17 @@ a second late reads as wrong. A continuous or fire-and-forget sound can absorb
 that slack; a sharp impact synced to a visible collision cannot.
 
 So Poingo doesn't just play a sound when the ball bounces — it plays it *ahead of
-time*. At startup, and again when the output device changes, it measures the
-real latency of the audio path through cubeb (`cubeb_get_min_latency`, then the
-running stream's `cubeb_stream_get_latency`). The predictive scheduler queues
-each bounce that much earlier, so the sound leaves the speakers exactly as the
-ball meets the wall. A small fixed onset-compensation trim accounts for the
-sound's own attack, so the *perceived* impact — not the first sample — lands on
-the frame.
+time*. While its native PipeWire stream is running, it reads the stream timing
+state and combines the queued samples, buffered samples, and remaining graph
+delay into an end-to-end output-latency estimate. The predictive scheduler
+queues each bounce that much earlier, so the sound leaves the speakers exactly
+as the ball meets the wall. A small fixed onset-compensation trim accounts for
+the sound's own attack, so the *perceived* impact — not the first sample — lands
+on the frame.
 
-This is why Poingo depends specifically on cubeb rather than whatever audio path
-is nearest to hand: cubeb is one of the few portable backends that reports real
-device latency. The shared DSP and mixer live in `libtoyaudio`; cubeb is only
-the device layer that makes the prediction accurate. Build without cubeb and the
-toy still runs — just silent, with nothing to schedule.
+Poingo requests interleaved 48 kHz floating-point stereo with an explicit
+`FL,FR` channel map. The shared DSP and mixer live in `libtoyaudio`; PipeWire is
+the device and latency-measurement layer.
 
 The sibling toys (paint, balloons) carry none of this: a spray hiss is a
 continuous stream and a balloon pop is fire-and-forget, so neither has a visual
