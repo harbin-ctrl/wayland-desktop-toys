@@ -1086,7 +1086,14 @@ void play_bounce_sound(int volume, float pan) {
 
     if (pan < 0.0f) pan = 0.0f;
     if (pan > 1.0f) pan = 1.0f;
-    float pan_shaped = g_a_mode ? pan : (0.08f + 0.84f * pan);
+    /*
+     * Keep the center fixed while making impacts track screen position more
+     * decisively.  The previous normal-mode mapping compressed the entire
+     * field into 8%..92%, which made rapid left/right impacts sound centered.
+     */
+    float pan_shaped = 0.5f + (pan - 0.5f) * 1.15f;
+    if (pan_shaped < 0.0f) pan_shaped = 0.0f;
+    if (pan_shaped > 1.0f) pan_shaped = 1.0f;
     float l_gain, r_gain;
     toy_audio_equal_power_pan(pan_shaped, &l_gain, &r_gain);
 
