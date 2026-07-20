@@ -21,23 +21,34 @@ PKG_CONFIG ?= pkg-config
 include $(DESKTOP_TOYS_DIR)/install.mk
 
 # Spray is a pure-Wayland client: Wayland + EGL/GLES for the overlay, and
-# (optionally) PulseAudio for the spray-can hiss. No SDL, no toolkit.
+# (optionally) cubeb for the spray-can hiss. No SDL, no toolkit.
 WAYLAND_CFLAGS := $(shell $(PKG_CONFIG) --cflags wayland-client wayland-egl egl glesv2 2>/dev/null)
 WAYLAND_LIBS := $(shell $(PKG_CONFIG) --libs wayland-client wayland-egl egl glesv2 2>/dev/null)
 ifeq ($(strip $(WAYLAND_LIBS)),)
 WAYLAND_LIBS := -lwayland-client -lwayland-egl -lEGL -lGLESv2
 endif
 
-# The hiss is optional: without libpulse-simple the toy builds silent.
-PULSE_CFLAGS := $(shell $(PKG_CONFIG) --cflags libpulse-simple 2>/dev/null)
-PULSE_LIBS := $(shell $(PKG_CONFIG) --libs libpulse-simple 2>/dev/null)
+# The hiss is optional: without cubeb the toy builds silent.
+CUBEB_PREFIX ?= /usr
+CUBEB_CFLAGS := $(shell $(PKG_CONFIG) --cflags libcubeb 2>/dev/null)
+CUBEB_LIBS := $(shell $(PKG_CONFIG) --libs libcubeb 2>/dev/null)
+ifeq ($(strip $(CUBEB_LIBS)),)
+ifneq ($(wildcard $(CUBEB_PREFIX)/include/cubeb/cubeb.h),)
+CUBEB_CFLAGS := -I$(CUBEB_PREFIX)/include
+ifneq ($(wildcard $(CUBEB_PREFIX)/lib64/libcubeb.a),)
+CUBEB_LIBS := $(CUBEB_PREFIX)/lib64/libcubeb.a
+else
+CUBEB_LIBS := -L$(CUBEB_PREFIX)/lib64 -lcubeb
+endif
+endif
+endif
 AUDIO_CFLAGS :=
 AUDIO_LIBS :=
-ifneq ($(strip $(PULSE_LIBS)),)
-AUDIO_CFLAGS := -DHAVE_PULSE $(PULSE_CFLAGS)
-AUDIO_LIBS := $(PULSE_LIBS)
+ifneq ($(strip $(CUBEB_LIBS)),)
+AUDIO_CFLAGS := -DHAVE_CUBEB $(CUBEB_CFLAGS)
+AUDIO_LIBS := $(CUBEB_LIBS) -lstdc++ -ldl
 else
-$(info libpulse-simple not found; building without the spray hiss.)
+$(info cubeb not found; building without the spray hiss.)
 endif
 
 # The paint rasterizer is hot float loops; build vectorization-friendly but
@@ -100,11 +111,11 @@ test: $(BIN_DIR)/test_engine
 
 $(BIN_DIR)/test_engine: test_engine.c src/paint.c spraycan.h \
 		xdg-shell-client-protocol.h $(RINGMENU_LIB) \
-		xdg-shell-protocol.o $(LODEPNG_LIB) | $(BIN_DIR)
+		xdg-shell-protocol.o $(LODEPNG_LIB) $(GHOSTICON_LIB) | $(BIN_DIR)
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE -I$(CURDIR) -I$(RINGMENU_DIR) \
-		-I$(TOYAUDIO_DIR) -I$(CURDIR)/../third_party/lodepng test_engine.c \
+		-I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng test_engine.c \
 		$(RINGMENU_LIB) xdg-shell-protocol.o $(LODEPNG_LIB) \
-		-o $@ $(WAYLAND_LIBS) -lm -lpthread
+		$(GHOSTICON_LIB) -o $@ $(WAYLAND_LIBS) -lm -lpthread
 
 install: $(BIN_DIR)/paint icons desktop-toys-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"

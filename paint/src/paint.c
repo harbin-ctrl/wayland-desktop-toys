@@ -28,9 +28,8 @@
 
 static PFNEGLSWAPBUFFERSWITHDAMAGEEXTPROC g_swap_damage;
 
-#ifdef HAVE_PULSE
-#include <pulse/simple.h>
-#include <pulse/error.h>
+#ifdef HAVE_CUBEB
+#include <cubeb/cubeb.h>
 #endif
 
 #include "xdg-shell-client-protocol.h"
@@ -1316,85 +1315,73 @@ static void clear_canvas(PaintState *st) {
 }
 
 
-#ifdef HAVE_PULSE
+#ifdef HAVE_CUBEB
 
 typedef struct {
-    pthread_t thread;
+    cubeb *ctx;
+    cubeb_stream *stream;
     pthread_mutex_t mu;
+    ToyHiss synth;
     bool spraying;
-    float size;      
-    bool quit;
+    float size;
     bool running;
 } Hiss;
 
 static Hiss g_hiss = { .mu = PTHREAD_MUTEX_INITIALIZER };
 
 #define HISS_RATE 44100
-#define HISS_CHUNK 512
 
-static void *hiss_thread(void *arg) {
-    Hiss *h = arg;
+static long hiss_data_cb(cubeb_stream *stream, void *user,
+                         const void *input, void *output, long nframes) {
+    (void)stream;
+    (void)input;
+    Hiss *h = user;
+    if (!h || !output || nframes <= 0) return nframes;
 
-    pa_sample_spec ss = {
-        .format = PA_SAMPLE_S16NE,
-        .rate = HISS_RATE,
-        .channels = 1,
-    };
-    pa_buffer_attr attr = {
-        .maxlength = (uint32_t)-1,
-        .tlength = HISS_RATE / 25 * 2,   
-        .prebuf = (uint32_t)-1,
-        .minreq = (uint32_t)-1,
-        .fragsize = (uint32_t)-1,
-    };
-    int perr = 0;
-    pa_simple *pa = pa_simple_new(NULL, "spray", PA_STREAM_PLAYBACK, NULL,
-                                  "spray-can hiss", &ss, NULL, &attr, &perr);
-    if (!pa) {
-        fprintf(stderr, "Spray: audio unavailable (%s); spraying silently.\n",
-                pa_strerror(perr));
-        return NULL;
-    }
-
-    ToyHiss synth;
-    toy_hiss_init(&synth);
-    bool flushed = true;
-    int16_t buf[HISS_CHUNK];
-    float fbuf[HISS_CHUNK];
-
-    for (;;) {
-        pthread_mutex_lock(&h->mu);
-        bool spraying = h->spraying;
-        float size = h->size;
-        bool quit = h->quit;
-        pthread_mutex_unlock(&h->mu);
-        if (quit) break;
-
-        if (!spraying && toy_hiss_is_idle(&synth)) {
-            if (!flushed) {
-                pa_simple_flush(pa, NULL);
-                flushed = true;
-            }
-            struct timespec nap = { 0, 15 * 1000 * 1000 };
-            nanosleep(&nap, NULL);
-            continue;
-        }
-        flushed = false;
-
-        toy_hiss_render(&synth, fbuf, HISS_CHUNK, spraying, size, HISS_RATE);
-        for (int i = 0; i < HISS_CHUNK; i++) {
-            buf[i] = (int16_t)(fbuf[i] * 32767.0f);
-        }
-        if (pa_simple_write(pa, buf, sizeof(buf), &perr) < 0) break;
-    }
-
-    pa_simple_free(pa);
-    return NULL;
+    pthread_mutex_lock(&h->mu);
+    toy_hiss_render(&h->synth, output, (int)nframes,
+                    h->spraying, h->size, HISS_RATE);
+    pthread_mutex_unlock(&h->mu);
+    return nframes;
 }
 
 static void hiss_start(void) {
-    if (pthread_create(&g_hiss.thread, NULL, hiss_thread, &g_hiss) == 0) {
-        g_hiss.running = true;
+    if (cubeb_init(&g_hiss.ctx, "paint", NULL) != CUBEB_OK || !g_hiss.ctx) {
+        fprintf(stderr, "Paint: cubeb unavailable; spraying silently.\n");
+        g_hiss.ctx = NULL;
+        return;
+    }
+
+    cubeb_stream_params params = {0};
+    params.format = CUBEB_SAMPLE_FLOAT32NE;
+    params.rate = HISS_RATE;
+    params.channels = 1;
+    params.layout = CUBEB_LAYOUT_MONO;
+    params.prefs = CUBEB_STREAM_PREF_NONE;
+
+    uint32_t latency_frames = 0;
+    if (cubeb_get_min_latency(g_hiss.ctx, &params, &latency_frames) != CUBEB_OK ||
+        latency_frames == 0) {
+        latency_frames = 512;
+    }
+    if (cubeb_stream_init(g_hiss.ctx, &g_hiss.stream, "paint-hiss",
+                          NULL, NULL, NULL, &params, latency_frames,
+                          hiss_data_cb, NULL, &g_hiss) != CUBEB_OK ||
+        !g_hiss.stream) {
+        fprintf(stderr, "Paint: failed to open cubeb stream; spraying silently.\n");
+        cubeb_destroy(g_hiss.ctx);
+        g_hiss.ctx = NULL;
+        return;
+    }
+    toy_hiss_init(&g_hiss.synth);
+    g_hiss.running = true;
+    if (cubeb_stream_start(g_hiss.stream) != CUBEB_OK) {
+        fprintf(stderr, "Paint: failed to start cubeb stream; spraying silently.\n");
+        cubeb_stream_destroy(g_hiss.stream);
+        g_hiss.stream = NULL;
+        cubeb_destroy(g_hiss.ctx);
+        g_hiss.ctx = NULL;
+        g_hiss.running = false;
     }
 }
 
@@ -1408,14 +1395,15 @@ static void hiss_set(bool spraying, float size01) {
 
 static void hiss_stop(void) {
     if (!g_hiss.running) return;
-    pthread_mutex_lock(&g_hiss.mu);
-    g_hiss.quit = true;
-    pthread_mutex_unlock(&g_hiss.mu);
-    pthread_join(g_hiss.thread, NULL);
+    cubeb_stream_stop(g_hiss.stream);
+    cubeb_stream_destroy(g_hiss.stream);
+    g_hiss.stream = NULL;
+    cubeb_destroy(g_hiss.ctx);
+    g_hiss.ctx = NULL;
     g_hiss.running = false;
 }
 
-#else // !HAVE_PULSE
+#else // !HAVE_CUBEB
 
 static void hiss_start(void) {}
 static void hiss_set(bool spraying, float size01) { (void)spraying; (void)size01; }
