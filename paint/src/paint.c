@@ -111,6 +111,9 @@ typedef enum {
 #define SPLAT_S_MIN 45.0
 #define SPLAT_S_MAX 260.0
 #define SPLAT_DRAG_SPACING 55.0
+#define SPLAT_SIZE_ALLOC_MAX (2.0 * SPLAT_S_MAX)
+#define SPLAT_SCRATCH_SIDE ((int)(2.0 * SPLAT_SIZE_ALLOC_MAX) + 64)
+#define SPLAT_SCRATCH_CAP ((size_t)SPLAT_SCRATCH_SIDE * SPLAT_SCRATCH_SIDE)
 
 typedef struct {
     float x, y;          
@@ -179,6 +182,11 @@ typedef struct {
     int dirty_x1;
     int dirty_y1;
     uint32_t *staging;
+
+    /* Reused by every splat; allocated once after the window is configured. */
+    float *splat_own;
+    float *splat_vdist;
+    uint8_t *splat_vlabel;
 
     bool shade_pending;
     int shade_x0, shade_y0, shade_x1, shade_y1;
@@ -1106,8 +1114,13 @@ static void draw_splat(PaintState *st, int cx, int cy, int size, uint8_t color_i
 
     int bw = x_end - x_start + 1;
     int bh = y_end - y_start + 1;
-    float *own = calloc((size_t)bw * (size_t)bh, sizeof(float));
-    if (!own) return;
+    size_t scratch_need = (size_t)bw * (size_t)bh;
+    if (!st->splat_own || !st->splat_vdist || !st->splat_vlabel ||
+        scratch_need > SPLAT_SCRATCH_CAP) return;
+    float *own = st->splat_own;
+    float *vdist = st->splat_vdist;
+    uint8_t *vlabel = st->splat_vlabel;
+    memset(own, 0, scratch_need * sizeof(*own));
 
     SplatFieldCtx fctx = {
         .mx = mx, .my = my, .mr = mr, .count = count,
@@ -1145,9 +1158,8 @@ static void draw_splat(PaintState *st, int cx, int cy, int size, uint8_t color_i
         int vbw = vx1 - vx0 + 1;
         int vbh = vy1 - vy0 + 1;
 
-        float *vdist = malloc(sizeof(float) * (size_t)vbw * (size_t)vbh);
-        uint8_t *vlabel = malloc((size_t)vbw * (size_t)vbh);
-        if (vdist && vlabel) {
+        size_t vneed = (size_t)vbw * (size_t)vbh;
+        if (vneed <= SPLAT_SCRATCH_CAP) {
             for (int by = 0; by < vbh; ++by) {
                 for (int bx = 0; bx < vbw; ++bx) {
                     size_t idx = (size_t)(vy0 + by) * width + (vx0 + bx);
@@ -1197,11 +1209,7 @@ static void draw_splat(PaintState *st, int cx, int cy, int size, uint8_t color_i
                 }
             }
         }
-        free(vdist);
-        free(vlabel);
     }
-
-    free(own);
 
     st->splat_count++;
 
@@ -2806,6 +2814,16 @@ int main(void) {
         fprintf(stderr, "Failed to initialize GL resources\n");
         return 1;
     }
+    st.splat_own = calloc(SPLAT_SCRATCH_CAP, sizeof(*st.splat_own));
+    st.splat_vdist = malloc(SPLAT_SCRATCH_CAP * sizeof(*st.splat_vdist));
+    st.splat_vlabel = malloc(SPLAT_SCRATCH_CAP * sizeof(*st.splat_vlabel));
+    if (!st.splat_own || !st.splat_vdist || !st.splat_vlabel) {
+        fprintf(stderr, "Failed to allocate splat workspace\n");
+        free(st.splat_own);
+        free(st.splat_vdist);
+        free(st.splat_vlabel);
+        return 1;
+    }
     update_input_region(&st);
 
     if (!create_cursor(&st)) {
@@ -2995,6 +3013,9 @@ int main(void) {
     free(st.field);
     free(st.color_map);
     free(st.staging);
+    free(st.splat_own);
+    free(st.splat_vdist);
+    free(st.splat_vlabel);
     if (st.cursor_surface) wl_surface_destroy(st.cursor_surface);
     if (st.cursor_buffer) wl_buffer_destroy(st.cursor_buffer);
     if (st.cursor_map) munmap(st.cursor_map, st.cursor_map_size);

@@ -1189,6 +1189,7 @@ static void shutdown_audio(void) {
 
     toy_sample_pair_free(&audio_state.bounce);
     toy_mixer_reset(&g_mixer);
+    toy_audio_release_scratch();
     audio_state.pending_size_scale = 1.0f;
     audio_state.current_size_scale = 1.0f;
     g_volume_muted = false;
@@ -1243,6 +1244,12 @@ static bool init_audio(bool start_muted) {
     if (!toy_sample_pair_alloc(&audio_state.bounce,
                                toy_audio_bounce_pair_length())) {
         fprintf(stderr, "Failed to allocate audio sample buffers\n");
+        shutdown_audio();
+        return false;
+    }
+    if (!toy_mixer_reserve(&g_mixer, audio_state.bounce.length) ||
+        !toy_audio_reserve_scratch(audio_state.bounce.length)) {
+        fprintf(stderr, "Failed to allocate audio mixer workspace\n");
         shutdown_audio();
         return false;
     }

@@ -57,6 +57,7 @@ typedef struct {
 
 
 void toy_mixer_init(ToyMixer *m, float initial_volume);
+bool toy_mixer_reserve(ToyMixer *m, int max_samples);
 
 void toy_mixer_render(ToyMixer *m, float *out, int nsamples, bool suppress);
 
@@ -79,6 +80,10 @@ void toy_mixer_begin_fade_out(ToyMixer *m, float seconds);
 bool toy_mixer_is_quiet(const ToyMixer *m);
 
 void toy_mixer_reset(ToyMixer *m);
+
+/* Reserve the temporary synthesis workspace before audio starts. */
+bool toy_audio_reserve_scratch(int max_samples);
+void toy_audio_release_scratch(void);
 
 
 bool toy_sample_pair_alloc(ToySamplePair *pair, int length);

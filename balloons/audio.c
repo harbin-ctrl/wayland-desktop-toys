@@ -652,6 +652,7 @@ void audio_shutdown(void) {
         toy_sample_pair_free(&g_thunder[c]);
     }
     toy_mixer_reset(&g_mixer);
+    toy_audio_release_scratch();
     audio_state.pending_size_scale = 1.0f;
     audio_state.current_size_scale = 1.0f;
 }
@@ -732,6 +733,12 @@ bool audio_init(void) {
             audio_shutdown();
             return false;
         }
+    }
+    if (!toy_mixer_reserve(&g_mixer, THUNDER_CLIP_SECONDS * SAMPLE_RATE) ||
+        !toy_audio_reserve_scratch(THUNDER_CLIP_SECONDS * SAMPLE_RATE)) {
+        fprintf(stderr, "balloons: failed to allocate audio mixer workspace\n");
+        audio_shutdown();
+        return false;
     }
 
     g_synth_trace = getenv("APNGO_TRACE") != NULL;

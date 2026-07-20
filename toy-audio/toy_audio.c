@@ -14,6 +14,9 @@
 #define TA_BOUNCE_TAIL_MULTIPLIER 6.0f
 #define TA_BOUNCE_BUFFER_SLACK 2048
 
+static float *g_nostalgia_dry;
+static int g_nostalgia_dry_capacity;
+
 
 void toy_mixer_init(ToyMixer *m, float initial_volume) {
     if (!m) return;
@@ -21,6 +24,34 @@ void toy_mixer_init(ToyMixer *m, float initial_volume) {
     m->master_volume = initial_volume;
     m->master_volume_before_mute = initial_volume;
     m->fade_gain = 1.0f;
+}
+
+bool toy_mixer_reserve(ToyMixer *m, int max_samples) {
+    if (!m || max_samples <= 0) return false;
+    for (int v = 0; v < TOY_AUDIO_MAX_VOICES; ++v) {
+        ToyVoice *voice = &m->voices[v];
+        if (voice->snapshot_capacity >= max_samples) continue;
+        float *data1 = malloc((size_t)max_samples * sizeof(float));
+        float *data2 = malloc((size_t)max_samples * sizeof(float));
+        if (!data1 || !data2) {
+            free(data1);
+            free(data2);
+            for (int i = 0; i <= v; ++i) {
+                free(m->voices[i].snapshot_data1);
+                free(m->voices[i].snapshot_data2);
+                m->voices[i].snapshot_data1 = NULL;
+                m->voices[i].snapshot_data2 = NULL;
+                m->voices[i].snapshot_capacity = 0;
+            }
+            return false;
+        }
+        free(voice->snapshot_data1);
+        free(voice->snapshot_data2);
+        voice->snapshot_data1 = data1;
+        voice->snapshot_data2 = data2;
+        voice->snapshot_capacity = max_samples;
+    }
+    return true;
 }
 
 void toy_mixer_render(ToyMixer *m, float *out, int nsamples, bool suppress) {
@@ -181,15 +212,6 @@ void toy_mixer_start_voice_panned(ToyMixer *m, const ToySamplePair *pair,
 
     ToyVoice *voice = &m->voices[voice_index];
 
-    if (voice->snapshot_capacity < pair->length) {
-        free(voice->snapshot_data1);
-        free(voice->snapshot_data2);
-        voice->snapshot_data1 = malloc((size_t)pair->length * sizeof(float));
-        voice->snapshot_data2 = malloc((size_t)pair->length * sizeof(float));
-        voice->snapshot_capacity =
-            (voice->snapshot_data1 && voice->snapshot_data2) ? pair->length : 0;
-    }
-
     if (voice->snapshot_capacity >= pair->length) {
         memcpy(voice->snapshot_data1, pair->data1,
                (size_t)pair->length * sizeof(float));
@@ -276,6 +298,23 @@ void toy_mixer_reset(ToyMixer *m) {
         free(m->voices[v].snapshot_data2);
     }
     toy_mixer_init(m, volume);
+}
+
+bool toy_audio_reserve_scratch(int max_samples) {
+    if (max_samples <= 0) return false;
+    if (g_nostalgia_dry_capacity >= max_samples) return true;
+    float *dry = realloc(g_nostalgia_dry,
+                         (size_t)max_samples * sizeof(float));
+    if (!dry) return false;
+    g_nostalgia_dry = dry;
+    g_nostalgia_dry_capacity = max_samples;
+    return true;
+}
+
+void toy_audio_release_scratch(void) {
+    free(g_nostalgia_dry);
+    g_nostalgia_dry = NULL;
+    g_nostalgia_dry_capacity = 0;
 }
 
 
@@ -540,8 +579,8 @@ void toy_audio_generate_bounce(float * restrict buffer, int nsamples,
     }
 
     if (nostalgia) {
-        float *dry = (float *)malloc((size_t)nsamples * sizeof(float));
-        if (dry) {
+        if (g_nostalgia_dry && nsamples <= g_nostalgia_dry_capacity) {
+            float *dry = g_nostalgia_dry;
             memcpy(dry, buffer, (size_t)nsamples * sizeof(float));
             float rt60 = 4.2f + 3.0f * decay_time;
             static const float comb_sec[4] = { 0.0437f, 0.0511f,
@@ -594,7 +633,6 @@ void toy_audio_generate_bounce(float * restrict buffer, int nsamples,
                 float out = dry[i] + er_lp + wet_mix * wet;
                 buffer[i] = floorf(out * 128.0f + 0.5f) * (1.0f / 128.0f);
             }
-            free(dry);
         }
     }
 }
