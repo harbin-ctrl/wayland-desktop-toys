@@ -182,6 +182,8 @@ static int g_ball_h = 512;
 #define VOLUME_HUD_HOLD_TIME 1.5f
 
 #define MIN_BOUNCE_SOUND_SPEED_RATIO 0.4f
+#define BOUNCE_DEBOUNCE_SECONDS 0.095f
+#define RECENT_BOUNCE_PLAYBACK_COUNT 12
 #define AUDIO_SHUTDOWN_CHECK_MS 100u
 #define AUDIO_SHUTDOWN_MAX_MS 2000u
 #define AUDIO_PREDICT_SECONDS 2.0f
@@ -193,7 +195,9 @@ static int g_ball_h = 512;
 #define AUDIO_PREDICT_ONSET_COMPENSATION_SECONDS 0.0125f
 #define AUDIO_PREDICT_MAX_EVENTS 128
 #define AUDIO_PREDICT_FIXED_STEP_SECONDS (1.0f / 240.0f)
+#define AUDIO_PREDICT_QUEUE_MAX 128
 #define AUDIO_PREDICT_EVENT_STALE_SECONDS 0.150f
+#define AUDIO_PREDICT_PLAYED_RETENTION_SECONDS 0.250f
 
 static float AUDIO_NORMALIZED_MIN = 0.0f;
 static const float AUDIO_NORMALIZED_MAX = 10.0f;
@@ -270,6 +274,27 @@ static float axis_vx, axis_vy, axis_vz;
 static float get_audio_predict_effective_delay_seconds(void);
 static float get_audio_predict_horizon_seconds(void);
 static void update_bounce_sound_style_for_mode(void);
+
+typedef struct {
+    uint32_t channels;
+} CubebProbeState;
+
+typedef struct {
+    cubeb *ctx;
+    cubeb_stream *stream;
+    uint32_t rate;
+    uint32_t latency_frames;
+    uint32_t channels;
+    uint32_t start_ticks;
+    uint32_t last_update_ticks;
+    bool active;
+    char backend_id[24];
+} CubebProbeRuntime;
+
+static CubebProbeRuntime g_cubeb_probe = {0};
+static PoingoAtomic g_cubeb_probe_restart_requested;
+
+
 
 typedef struct {
     float lon_norm;
@@ -358,6 +383,7 @@ static void pick_palette_colors(float light_value,
                                 bool allow_white);
 static bool ensure_sphere_pixel_cache(int size);
 static double get_perf_seconds(uint64_t start_counter, uint64_t end_counter);
+static bool g_debug_mode;
 static void audio_predict_reset(float now_time);
 
 
@@ -813,6 +839,20 @@ typedef struct {
     int count;
 } AudioPredictBuffer;
 
+typedef struct {
+    BounceEvent event;
+    float last_seen_time;
+    bool active;
+    bool played;
+} AudioPredictQueueEntry;
+
+typedef struct {
+    float time;
+    int volume;
+    int surface;
+    bool valid;
+} RecentBouncePlayback;
+
 AudioState audio_state = {
     .bounce = { NULL, NULL, 0, true },
     .pending_size_scale = 1.0f,
@@ -836,6 +876,7 @@ static void update_bounce_sound_style_for_mode(void) {
 }
 
 static AudioPredictBuffer g_audio_predict = {0};
+static AudioPredictQueueEntry g_audio_predict_queue[AUDIO_PREDICT_QUEUE_MAX] = {0};
 static float g_audio_sim_time = 0.0f;
 static float g_audio_predict_delay_seconds = AUDIO_PREDICT_DELAY_SECONDS;
 static float g_audio_predict_step_seconds = 1.0f / (float)FPS;
@@ -849,6 +890,12 @@ enum {
 };
 static uint64_t g_actual_bounce_serial[BOUNCE_SURFACE_COUNT] = {0};
 static uint64_t g_played_bounce_serial[BOUNCE_SURFACE_COUNT] = {0};
+static bool g_predict_audit = false;
+static uint64_t g_audit_expected[BOUNCE_SURFACE_COUNT] = {0};
+static uint64_t g_audit_selected[BOUNCE_SURFACE_COUNT] = {0};
+static uint64_t g_audit_committed[BOUNCE_SURFACE_COUNT] = {0};
+static RecentBouncePlayback g_recent_bounce_playbacks[RECENT_BOUNCE_PLAYBACK_COUNT] = {{0}};
+static int g_recent_bounce_playback_next = 0;
 static bool audio_is_perceptually_quiet(void) {
     if (!audio_device_open) {
         return true;
@@ -904,6 +951,7 @@ static float g_speed_hud_time = 0.0f;
 static float g_speed_hud_alpha = 0.0f;
 static bool g_suppress_hud = false;
 static float g_freerange_ball_scale = 1.0f;
+static bool g_debug_mode = false;  
 
 typedef struct {
     bool is_pressed;
@@ -1030,7 +1078,7 @@ static bool init_audio(bool start_muted) {
     return true;
 }
 
-void play_bounce_sound(int volume, float pan) {
+bool play_bounce_sound(int volume, float pan) {
     float size_scale = fmaxf(audio_state.current_size_scale, 0.05f);
 
     if (audio_state.bounce.dirty) {
@@ -1068,7 +1116,7 @@ void play_bounce_sound(int volume, float pan) {
     bool claimed = toy_mixer_claim_voice(
         &g_mixer, audio_state.bounce.length, &claim);
     audio_unlock();
-    if (!claimed) return;
+    if (!claimed) return false;
 
     bool copied = toy_mixer_copy_claimed_voice(
         &g_mixer, claim, &audio_state.bounce);
@@ -1082,6 +1130,7 @@ void play_bounce_sound(int volume, float pan) {
         toy_mixer_cancel_voice(&g_mixer, claim);
     }
     audio_unlock();
+    return committed;
 }
 
 static void adjust_master_volume(float delta) {
@@ -1519,10 +1568,126 @@ static void maybe_play_actual_bounce_sound(bool make_noise, float impact_speed, 
         return;
     }
     float ratio = impact_speed / baseline_speed;
-    play_bounce_sound(volume_from_impact_ratio(ratio), pan);
+    (void)play_bounce_sound(volume_from_impact_ratio(ratio), pan);
+}
+
+static void audit_actual_collision(bool predictive_pass, int surface,
+                                   float impact_speed, float baseline_speed) {
+    if (g_predict_audit && !predictive_pass &&
+        surface >= 0 && surface < BOUNCE_SURFACE_COUNT &&
+        impact_speed_is_audible(impact_speed, baseline_speed)) {
+        g_audit_expected[surface]++;
+    }
 }
 
 static void audio_predict_reset(float now_time);
+
+static long cubeb_silence_cb(cubeb_stream *stream, void *user, const void *in,
+                             void *out, long nframes) {
+    (void)stream;
+    (void)in;
+    CubebProbeRuntime *state = (CubebProbeRuntime *)user;
+    if (!out || !state || state->channels == 0) {
+        return nframes;
+    }
+    size_t samples = (size_t)nframes * (size_t)state->channels;
+    memset(out, 0, samples * sizeof(float));
+    return nframes;
+}
+
+static void cubeb_state_cb(cubeb_stream *stream, void *user, cubeb_state state) {
+    (void)stream;
+    (void)user;
+    (void)state;
+}
+
+static void probe_cubeb_stop(void) {
+    if (g_cubeb_probe.stream) {
+        cubeb_stream_stop(g_cubeb_probe.stream);
+        cubeb_stream_destroy(g_cubeb_probe.stream);
+        g_cubeb_probe.stream = NULL;
+    }
+    if (g_cubeb_probe.ctx) {
+        cubeb_destroy(g_cubeb_probe.ctx);
+        g_cubeb_probe.ctx = NULL;
+    }
+    g_cubeb_probe.rate = 0;
+    g_cubeb_probe.latency_frames = 0;
+    g_cubeb_probe.channels = 0;
+    g_cubeb_probe.active = false;
+    snprintf(g_cubeb_probe.backend_id, sizeof(g_cubeb_probe.backend_id), "unknown");
+}
+
+static void probe_cubeb_start(void) {
+    if (g_cubeb_probe.active) {
+        return;
+    }
+
+    cubeb *ctx = NULL;
+    if (cubeb_init(&ctx, "poingo-latency-probe", NULL) != CUBEB_OK || !ctx) {
+        return;
+    }
+
+    uint32_t rate = SAMPLE_RATE;
+    if (cubeb_get_preferred_sample_rate(ctx, &rate) != CUBEB_OK || rate == 0) {
+        rate = SAMPLE_RATE;
+    }
+
+    cubeb_stream_params params;
+    memset(&params, 0, sizeof(params));
+    params.format = CUBEB_SAMPLE_FLOAT32NE;
+    params.rate = rate;
+    params.channels = 1;
+    params.layout = CUBEB_LAYOUT_MONO;
+
+    uint32_t latency_frames = 0;
+    if (cubeb_get_min_latency(ctx, &params, &latency_frames) != CUBEB_OK || latency_frames == 0) {
+        latency_frames = rate / 50;  
+    }
+
+    cubeb_stream *stream = NULL;
+    if (cubeb_stream_init(ctx, &stream, "poingo-probe",
+                          NULL, NULL,
+                          NULL, &params,
+                          latency_frames,
+                          cubeb_silence_cb, cubeb_state_cb,
+                          &g_cubeb_probe) != CUBEB_OK || !stream) {
+        cubeb_destroy(ctx);
+        return;
+    }
+
+    if (cubeb_stream_start(stream) != CUBEB_OK) {
+        cubeb_stream_destroy(stream);
+        cubeb_destroy(ctx);
+        return;
+    }
+
+    g_cubeb_probe.ctx = ctx;
+    g_cubeb_probe.stream = stream;
+    g_cubeb_probe.rate = rate;
+    g_cubeb_probe.latency_frames = latency_frames;
+    g_cubeb_probe.channels = params.channels;
+    g_cubeb_probe.start_ticks = poingo_ticks_ms();
+    g_cubeb_probe.last_update_ticks = g_cubeb_probe.start_ticks;
+    const char *backend_id = cubeb_get_backend_id(ctx);
+    if (backend_id) {
+        snprintf(g_cubeb_probe.backend_id, sizeof(g_cubeb_probe.backend_id), "%s", backend_id);
+    } else {
+        snprintf(g_cubeb_probe.backend_id, sizeof(g_cubeb_probe.backend_id), "unknown");
+    }
+    g_cubeb_probe.active = true;
+}
+
+static void __attribute__((unused)) probe_cubeb_handle_restart(void) {
+    if (poingo_atomic_set(&g_cubeb_probe_restart_requested, 0) == 0) {
+        return;
+    }
+    probe_cubeb_stop();
+    g_audio_predict_delay_seconds = AUDIO_PREDICT_DELAY_SECONDS;
+    g_cubeb_probe.start_ticks = 0;
+    g_cubeb_probe.last_update_ticks = 0;
+    probe_cubeb_start();
+}
 
 static void update_audio_output_latency(void) {
     static uint32_t last_update_ticks = 0;
@@ -1568,8 +1733,177 @@ static inline void append_bounce_event(BounceEvent *events, int *event_count, in
     (*event_count)++;
 }
 
+static float get_bounce_dedupe_window_seconds(void) {
+    float dedupe_window = g_audio_predict_step_seconds * 1.5f;
+    if (dedupe_window < 0.020f) {
+        dedupe_window = 0.020f;
+    }
+    if (dedupe_window > BOUNCE_DEBOUNCE_SECONDS) {
+        dedupe_window = BOUNCE_DEBOUNCE_SECONDS;
+    }
+    return dedupe_window;
+}
+
+static bool __attribute__((unused))
+recent_bounce_playback_matches(const BounceEvent *ev) {
+    if (!ev) {
+        return false;
+    }
+    float dedupe_window = get_bounce_dedupe_window_seconds();
+    for (int i = 0; i < RECENT_BOUNCE_PLAYBACK_COUNT; ++i) {
+        const RecentBouncePlayback *recent = &g_recent_bounce_playbacks[i];
+        if (!recent->valid) {
+            continue;
+        }
+        if (recent->surface != ev->surface) {
+            continue;
+        }
+        if (fabsf(recent->time - ev->time) > dedupe_window) {
+            continue;
+        }
+        if (abs(recent->volume - ev->volume) > 2) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+static void clear_audio_predict_queue(void) {
+    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
+        g_audio_predict_queue[i].active = false;
+        g_audio_predict_queue[i].played = false;
+        g_audio_predict_queue[i].last_seen_time = -1000000.0f;
+    }
+}
+
+static float get_audio_predict_match_window_seconds(void) {
+    float match_window = g_audio_predict_step_seconds * 2.5f;
+    if (match_window < 0.010f) {
+        match_window = 0.010f;
+    }
+    if (match_window > 0.050f) {
+        match_window = 0.050f;
+    }
+    return match_window;
+}
+
+static int find_audio_predict_queue_match(const BounceEvent *ev) {
+    if (!ev) {
+        return -1;
+    }
+    float match_window = get_audio_predict_match_window_seconds();
+    float best_diff = match_window + 1.0f;
+    int best_index = -1;
+    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
+        const AudioPredictQueueEntry *entry = &g_audio_predict_queue[i];
+        if (!entry->active || entry->played) {
+            continue;
+        }
+        if (entry->event.surface != ev->surface) {
+            continue;
+        }
+        if (abs(entry->event.volume - ev->volume) > 2) {
+            continue;
+        }
+        float diff = fabsf(entry->event.time - ev->time);
+        if (diff > match_window) {
+            continue;
+        }
+        if (diff < best_diff) {
+            best_diff = diff;
+            best_index = i;
+        }
+    }
+    return best_index;
+}
+
+static int allocate_audio_predict_queue_slot(void) {
+    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
+        if (!g_audio_predict_queue[i].active) {
+            return i;
+        }
+    }
+
+    int best_index = 0;
+    float best_score = 1000000.0f;
+    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
+        const AudioPredictQueueEntry *entry = &g_audio_predict_queue[i];
+        float score = entry->played ? entry->event.time - 1000.0f : entry->event.time;
+        if (score < best_score) {
+            best_score = score;
+            best_index = i;
+        }
+    }
+    return best_index;
+}
+
+static void __attribute__((unused))
+reconcile_audio_predict_queue(const AudioPredictBuffer *buffer, float now_time) {
+    if (!buffer) {
+        return;
+    }
+
+    for (int i = 0; i < buffer->count; ++i) {
+        const BounceEvent *ev = &buffer->events[i];
+        int match_index = find_audio_predict_queue_match(ev);
+        if (match_index >= 0) {
+            g_audio_predict_queue[match_index].event = *ev;
+            g_audio_predict_queue[match_index].last_seen_time = now_time;
+        } else {
+            int slot = allocate_audio_predict_queue_slot();
+            g_audio_predict_queue[slot].event = *ev;
+            g_audio_predict_queue[slot].last_seen_time = now_time;
+            g_audio_predict_queue[slot].active = true;
+            g_audio_predict_queue[slot].played = false;
+        }
+    }
+}
+
+static void __attribute__((unused))
+cleanup_audio_predict_queue(float now_time, float effective_delay) {
+    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
+        AudioPredictQueueEntry *entry = &g_audio_predict_queue[i];
+        if (!entry->active) {
+            continue;
+        }
+
+        if (entry->played) {
+            if ((now_time - entry->event.time) > AUDIO_PREDICT_PLAYED_RETENTION_SECONDS) {
+                entry->active = false;
+            }
+            continue;
+        }
+
+        if ((now_time - entry->last_seen_time) > AUDIO_PREDICT_EVENT_STALE_SECONDS) {
+            entry->active = false;
+            continue;
+        }
+
+        if ((entry->event.time + effective_delay) < (now_time - AUDIO_PREDICT_EVENT_STALE_SECONDS)) {
+            entry->active = false;
+        }
+    }
+}
+
+static void __attribute__((unused))
+record_recent_bounce_playback(const BounceEvent *ev) {
+    if (!ev) {
+        return;
+    }
+    g_recent_bounce_playbacks[g_recent_bounce_playback_next].time = ev->time;
+    g_recent_bounce_playbacks[g_recent_bounce_playback_next].volume = ev->volume;
+    g_recent_bounce_playbacks[g_recent_bounce_playback_next].surface = ev->surface;
+    g_recent_bounce_playbacks[g_recent_bounce_playback_next].valid = true;
+    g_recent_bounce_playback_next++;
+    if (g_recent_bounce_playback_next >= RECENT_BOUNCE_PLAYBACK_COUNT) {
+        g_recent_bounce_playback_next = 0;
+    }
+}
+
 static void audio_predict_reset(float now_time) {
     (void)now_time;
+    clear_audio_predict_queue();
     for (int surface = 0; surface < BOUNCE_SURFACE_COUNT; ++surface) {
         if (g_actual_bounce_serial[surface] <
             g_played_bounce_serial[surface]) {
@@ -1579,6 +1913,10 @@ static void audio_predict_reset(float now_time) {
         g_played_bounce_serial[surface] =
             g_actual_bounce_serial[surface];
     }
+    for (int i = 0; i < RECENT_BOUNCE_PLAYBACK_COUNT; ++i) {
+        g_recent_bounce_playbacks[i].valid = false;
+    }
+    g_recent_bounce_playback_next = 0;
 }
 
 static float get_audio_predict_effective_delay_seconds(void) {
@@ -1670,8 +2008,18 @@ static void build_audio_predict_buffer(AudioPredictBuffer *buffer,
     }
 }
 
-static void trigger_predictive_audio(const AudioPredictBuffer *buffer,
-                                     float now_time, bool make_noise) {
+static void trigger_predictive_audio_with_timing(const AudioPredictBuffer *buffer,
+                                                 float now_time,
+                                                 bool make_noise,
+                                                 float *timing_error_out,
+                                                 bool *timing_valid_out) {
+    if (timing_error_out) {
+        *timing_error_out = 0.0f;
+    }
+    if (timing_valid_out) {
+        *timing_valid_out = false;
+    }
+
     if (!buffer || !make_noise) {
         return;
     }
@@ -1681,6 +2029,8 @@ static void trigger_predictive_audio(const AudioPredictBuffer *buffer,
         effective_delay = g_audio_predict_step_seconds;
     }
     float target_time = now_time + effective_delay;
+    int timing_samples = 0;
+    float timing_accum = 0.0f;
 
     /*
      * Use only this frame's fresh simulation.  The former persistent queue
@@ -1705,9 +2055,33 @@ static void trigger_predictive_audio(const AudioPredictBuffer *buffer,
             continue;
         }
 
-        play_bounce_sound(ev->volume, ev->pan);
+        if (g_predict_audit) {
+            g_audit_selected[ev->surface]++;
+        }
+        bool committed = play_bounce_sound(ev->volume, ev->pan);
+        if (g_predict_audit && committed) {
+            g_audit_committed[ev->surface]++;
+        }
         g_played_bounce_serial[ev->surface] = ev->serial;
+
+        float expected_play_time = event_time - effective_delay;
+        float timing_error = now_time - expected_play_time;
+        timing_accum += timing_error;
+        timing_samples++;
     }
+
+    if (timing_samples > 0) {
+        if (timing_error_out) {
+            *timing_error_out = timing_accum / (float)timing_samples;
+        }
+        if (timing_valid_out) {
+            *timing_valid_out = true;
+        }
+    }
+}
+
+static void trigger_predictive_audio(const AudioPredictBuffer *buffer, float now_time, bool make_noise) {
+    trigger_predictive_audio_with_timing(buffer, now_time, make_noise, NULL, NULL);
 }
 
 static void update_ball_physics(float *ball_x, float *ball_y,
@@ -1753,6 +2127,8 @@ static void update_ball_physics(float *ball_x, float *ball_y,
         uint64_t serial = surface_serials
                               ? ++surface_serials[BOUNCE_SURFACE_LEFT]
                               : 0;
+        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_LEFT,
+                               fabsf(*ball_vx), natural_vx);
         if (predictive_pass) {
             append_bounce_event(events, event_count, max_events, event_time,
                                 fabsf(*ball_vx), natural_vx,
@@ -1769,6 +2145,8 @@ static void update_ball_physics(float *ball_x, float *ball_y,
         uint64_t serial = surface_serials
                               ? ++surface_serials[BOUNCE_SURFACE_RIGHT]
                               : 0;
+        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_RIGHT,
+                               fabsf(*ball_vx), natural_vx);
         if (predictive_pass) {
             append_bounce_event(events, event_count, max_events, event_time,
                                 fabsf(*ball_vx), natural_vx,
@@ -1787,6 +2165,8 @@ static void update_ball_physics(float *ball_x, float *ball_y,
         uint64_t serial = surface_serials
                               ? ++surface_serials[BOUNCE_SURFACE_CEILING]
                               : 0;
+        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_CEILING,
+                               impact_vy, ideal_vy);
         if (predictive_pass) {
             append_bounce_event(events, event_count, max_events, event_time,
                                 impact_vy, ideal_vy,
@@ -1817,6 +2197,8 @@ static void update_ball_physics(float *ball_x, float *ball_y,
         uint64_t serial = surface_serials
                               ? ++surface_serials[BOUNCE_SURFACE_FLOOR]
                               : 0;
+        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_FLOOR,
+                               fabsf(impact_vy), ideal_vy);
         if (predictive_pass) {
             append_bounce_event(events, event_count, max_events, event_time,
                                 fabsf(impact_vy), ideal_vy,
@@ -2023,6 +2405,7 @@ typedef struct {
 
     uint64_t last_counter;
     uint64_t performance_frequency;
+    bool has_last_counter;
     bool make_noise;
     float last_total_prop;
 
@@ -2451,6 +2834,16 @@ static void freerange_regen_upload_step(FreedomState *st, FreedomFrameSet *frame
         return;
     }
 
+    if (g_debug_mode && uploaded_this_tick > 0) {
+        static int regen_log_countdown = 0;
+        if (--regen_log_countdown <= 0) {
+            regen_log_countdown = 60;
+            int workers_at = poingo_atomic_get(&ctx->next_seq);
+            fprintf(stderr, "[regen] uploaded %d  workers at %d/%d  total uploaded %d/%d\n",
+                    uploaded_this_tick, workers_at, total,
+                    st->regen_units_uploaded, total);
+        }
+    }
 }
 
 
@@ -4296,10 +4689,14 @@ static void freerange_signal_handler(int signum) {
 typedef struct {
     bool     ready;
     uint32_t compositor_ms;   
+    uint64_t delivery_ns;     
 } FrameCbData;
 
 static void wayland_frame_done(void *data, struct wl_callback *callback, uint32_t time) {
+    struct timespec _ts;
+    clock_gettime(CLOCK_MONOTONIC, &_ts);
     FrameCbData *fcb = (FrameCbData *)data;
+    fcb->delivery_ns  = (uint64_t)_ts.tv_sec * 1000000000ULL + (uint64_t)_ts.tv_nsec;
     fcb->ready        = true;
     fcb->compositor_ms = time;
     wl_callback_destroy(callback);
@@ -4616,6 +5013,11 @@ static int run_freerange_wayland(bool start_muted) {
             }
             has_buffer_age = strstr(egl_exts, "EGL_EXT_buffer_age") != NULL;
         }
+        if (g_debug_mode) {
+            fprintf(stderr, "[egl] swap_with_damage=%s buffer_age=%s\n",
+                    pfn_swap_damage ? "yes" : "no",
+                    has_buffer_age ? "yes" : "no");
+        }
     }
 
     wl_surface_commit(st.surface);
@@ -4685,6 +5087,7 @@ static int run_freerange_wayland(bool start_muted) {
         st.performance_frequency = 1;
     }
     st.last_counter = poingo_perf_counter();
+    st.has_last_counter = true;
 
     const double TARGET_FRAME_SECONDS = 1.0 / (double)target_fps;
     const double SNAP_THRESHOLD = fmax(0.00075, TARGET_FRAME_SECONDS * 0.08);
@@ -4704,6 +5107,33 @@ static int run_freerange_wayland(bool start_muted) {
     bool     has_prev_compositor_ms = false;
     int obscured_frames = 0; 
 
+    FILE   *fr_log        = NULL;
+    uint64_t  fr_last       = 0;
+    double  fr_mean       = 0.0, fr_M2 = 0.0, fr_max = 0.0;
+    int     fr_n          = 0;
+    uint64_t  fr_report_at  = poingo_perf_counter();
+
+    FILE   *ov_log        = NULL;
+    double  ov_mean       = 0.0, ov_M2 = 0.0, ov_max = 0.0;
+    int     ov_n          = 0;
+
+    FILE   *gf_log        = NULL;  
+    double  gf_mean       = 0.0, gf_M2 = 0.0, gf_max = 0.0;
+    int     gf_n          = 0;
+
+    FILE    *fcb_log      = NULL;
+    uint64_t fcb_prev_del = 0;                          
+    uint64_t pump_enter_ns;
+    int      fcbi_n       = 0;                          
+    double   fcbi_mean    = 0.0, fcbi_M2 = 0.0, fcbi_max = 0.0;
+    int      pw_n         = 0;                          
+    double   pw_mean      = 0.0, pw_M2  = 0.0, pw_max  = 0.0;
+    int      wk_n         = 0;                          
+    double   wk_mean      = 0.0, wk_M2  = 0.0, wk_max  = 0.0;
+    int      cs_n         = 0;                          
+    double   cs_mean      = 0.0, cs_M2  = 0.0;
+    uint64_t   fcb_report_at = poingo_perf_counter();
+
     uint64_t  tick_start;
     double  prev_non_upload_ms  = 0.0;
     double  regen_ms_per_unit   = 0.0;
@@ -4711,8 +5141,57 @@ static int run_freerange_wayland(bool start_muted) {
     int     regen_measure_frames = 0;
     bool    regen_rechunked      = false;
 
+    int    drop_red          = 0;
+    int    drop_yellow       = 0;
+    int    normal_count      = 0;
+    uint32_t drop_window_start = poingo_ticks_ms();
+    double apb_ms_sum        = 0.0;
+    double apb_ms_max        = 0.0;
+    int    apb_count         = 0;
+
+    if (g_debug_mode) {
+        char fr_path[64];
+        snprintf(fr_path, sizeof(fr_path), "/tmp/poingo_frames_%d.csv", (int)getpid());
+        fr_log = fopen(fr_path, "w");
+        if (fr_log) {
+            fprintf(fr_log, "# interval_ms\n");
+            fflush(fr_log);
+        }
+        char ov_path[64];
+        snprintf(ov_path, sizeof(ov_path), "/tmp/poingo_overhead_%d.csv", (int)getpid());
+        ov_log = fopen(ov_path, "w");
+        if (ov_log) {
+            fprintf(ov_log, "# overhead_ms\n");
+            fflush(ov_log);
+        }
+        fprintf(stderr, "[debug] frame log:    %s\n", fr_path);
+        fprintf(stderr, "[debug] overhead log: %s\n", ov_path);
+        char gf_path[64];
+        snprintf(gf_path, sizeof(gf_path), "/tmp/poingo_glfinish_%d.csv", (int)getpid());
+        gf_log = fopen(gf_path, "w");
+        if (gf_log) {
+            fprintf(gf_log, "# glfinish_ms\n");
+            fflush(gf_log);
+        }
+        fprintf(stderr, "[debug] glfinish log: %s\n", gf_path);
+        char fcb_path[64];
+        snprintf(fcb_path, sizeof(fcb_path), "/tmp/poingo_fcb_%d.csv", (int)getpid());
+        fcb_log = fopen(fcb_path, "w");
+        if (fcb_log) {
+            fprintf(fcb_log, "delivery_ns,interval_us,poll_wait_us,wake_us,cstamp_off_us\n");
+            fflush(fcb_log);
+        }
+        fprintf(stderr, "[debug] fcb log:      %s\n", fcb_path);
+    }
+
     while (st.running) {
         bool was_ball_grabbed = st.ball_grabbed;
+        bool miss_this_frame  = false;
+        {
+            struct timespec _pe;
+            clock_gettime(CLOCK_MONOTONIC, &_pe);
+            pump_enter_ns = (uint64_t)_pe.tv_sec * 1000000000ULL + (uint64_t)_pe.tv_nsec;
+        }
         freerange_pump_events(st.display, 20);
         tick_start = poingo_perf_counter();
         if (g_freerange_quit_requested) {
@@ -4761,6 +5240,20 @@ static int run_freerange_wayland(bool start_muted) {
             double comp_delta_s    = (double)comp_delta_ms * 0.001;
             if (comp_delta_s >= TARGET_FRAME_SECONDS * 1.5 &&
                 comp_delta_s <= TARGET_FRAME_SECONDS * 8.0) {
+                miss_this_frame = true;
+                if (comp_delta_ms >= 35) drop_red++;
+                else drop_yellow++;
+                if (g_debug_mode) {
+                    bool use_color = isatty(STDERR_FILENO);
+                    const char *col = use_color
+                        ? (comp_delta_ms >= 35 ? "\033[91m"   
+                          : comp_delta_ms < 32 ? "\033[93m"   
+                          :                      "")           
+                        : "";
+                    const char *rst = use_color ? "\033[0m" : "";
+                    fprintf(stderr, "%s[miss] T+%.1fs  %u ms%s\n",
+                            col, poingo_ticks_ms() / 1000.0, comp_delta_ms, rst);
+                }
                 if (sim_delta > TARGET_FRAME_SECONDS) {
                     delta_error_accum += (sim_delta - TARGET_FRAME_SECONDS);
                     sim_delta = TARGET_FRAME_SECONDS;
@@ -4853,6 +5346,7 @@ static int run_freerange_wayland(bool start_muted) {
         g_audio_sim_time += (float)sim_delta;
         if (use_audio_prediction &&
             !st.ball_grabbed && !st.ball_cleared) {
+            uint64_t apb_t0 = poingo_perf_counter();
             build_audio_predict_buffer(&g_audio_predict,
                                        g_audio_sim_time,
                                        st.ball_x, st.ball_y,
@@ -4862,6 +5356,11 @@ static int run_freerange_wayland(bool start_muted) {
                                        0.0f, 0.0f,
                                        st.ball_diameter, st.ball_diameter_norm,
                                        (float)sim_delta);
+            double apb_ms =
+                get_perf_seconds(apb_t0, poingo_perf_counter()) * 1000.0;
+            apb_ms_sum += apb_ms;
+            apb_count++;
+            if (apb_ms > apb_ms_max) apb_ms_max = apb_ms;
             trigger_predictive_audio(
                 &g_audio_predict, g_audio_sim_time, st.make_noise);
         }
@@ -4903,7 +5402,115 @@ static int run_freerange_wayland(bool start_muted) {
             }
             obscured_frames = 0;
 
-            if (!has_prev_compositor_ms && fr_cb.compositor_ms != 0) {
+            uint64_t fr_now = poingo_perf_counter();
+            if (g_debug_mode && fr_last != 0) {
+                double ms = (double)(fr_now - fr_last) /
+                            (double)st.performance_frequency * 1000.0;
+                if (fr_log) fprintf(fr_log, "%.3f\n", ms);
+                fr_n++;
+                double d1 = ms - fr_mean;
+                fr_mean += d1 / fr_n;
+                fr_M2   += d1 * (ms - fr_mean);
+                if (ms > fr_max) fr_max = ms;
+                double elapsed = (double)(fr_now - fr_report_at) /
+                                 (double)st.performance_frequency;
+                if (elapsed >= 2.0 && fr_n >= 2) {
+                    double stdev = sqrt(fr_M2 / (fr_n - 1));
+                    double ov_stdev = (ov_n >= 2) ? sqrt(ov_M2 / (ov_n - 1)) : 0.0;
+                    double gf_stdev = (gf_n >= 2) ? sqrt(gf_M2 / (gf_n - 1)) : 0.0;
+                    fprintf(stderr,
+                            "[fps] %.1f fps  interval: mean=%.2fms stdev=%.2fms max=%.1fms"
+                            "  overhead: mean=%.2fms stdev=%.2fms max=%.1fms"
+                            "  glfinish: mean=%.2fms stdev=%.2fms max=%.1fms\n",
+                            fr_n / elapsed,
+                            fr_mean, stdev, fr_max,
+                            ov_mean, ov_stdev, ov_max,
+                            gf_mean, gf_stdev, gf_max);
+                    fr_n = 0; fr_mean = 0.0; fr_M2 = 0.0; fr_max = 0.0;
+                    ov_n = 0; ov_mean = 0.0; ov_M2 = 0.0; ov_max = 0.0;
+                    gf_n = 0; gf_mean = 0.0; gf_M2 = 0.0; gf_max = 0.0;
+                    fr_report_at = fr_now;
+                }
+            }
+            fr_last = fr_now;
+
+            if (g_debug_mode && fr_cb.delivery_ns != 0) {
+                struct timespec _noticed;
+                clock_gettime(CLOCK_MONOTONIC, &_noticed);
+                uint64_t noticed_ns = (uint64_t)_noticed.tv_sec * 1000000000ULL
+                                    + (uint64_t)_noticed.tv_nsec;
+
+                double wake_us = (double)(int64_t)(noticed_ns - fr_cb.delivery_ns) / 1000.0;
+
+                uint64_t del_ms_mod = (fr_cb.delivery_ns / 1000000ULL) & 0xFFFFFFFFULL;
+                int32_t  cs_diff_ms = (int32_t)(del_ms_mod - (uint32_t)fr_cb.compositor_ms);
+                double   cstamp_off_us = cs_diff_ms * 1000.0;
+
+                double poll_wait_us = 0.0;
+                if (pump_enter_ns != 0 && fr_cb.delivery_ns >= pump_enter_ns) {
+                    poll_wait_us = (double)(fr_cb.delivery_ns - pump_enter_ns) / 1000.0;
+                }
+
+                if (fcb_prev_del != 0 && fr_cb.delivery_ns > fcb_prev_del) {
+                    double interval_us = (double)(fr_cb.delivery_ns - fcb_prev_del) / 1000.0;
+                    fcbi_n++;
+                    double _d = interval_us - fcbi_mean;
+                    fcbi_mean += _d / fcbi_n;
+                    fcbi_M2   += _d * (interval_us - fcbi_mean);
+                    if (interval_us > fcbi_max) fcbi_max = interval_us;
+                    if (poll_wait_us >= 0.0 && poll_wait_us < 30000.0) {
+                        pw_n++;
+                        double _p = poll_wait_us - pw_mean;
+                        pw_mean += _p / pw_n;
+                        pw_M2   += _p * (poll_wait_us - pw_mean);
+                        if (poll_wait_us > pw_max) pw_max = poll_wait_us;
+                    }
+                    if (wake_us >= 0.0 && wake_us < 30000.0) {
+                        wk_n++;
+                        double _w = wake_us - wk_mean;
+                        wk_mean += _w / wk_n;
+                        wk_M2   += _w * (wake_us - wk_mean);
+                        if (wake_us > wk_max) wk_max = wake_us;
+                    }
+                    cs_n++;
+                    double _c = cstamp_off_us - cs_mean;
+                    cs_mean += _c / cs_n;
+                    cs_M2   += _c * (cstamp_off_us - cs_mean);
+
+                    if (fcb_log) {
+                        fprintf(fcb_log, "%llu,%.1f,%.1f,%.1f,%.1f\n",
+                                (unsigned long long)fr_cb.delivery_ns,
+                                interval_us, poll_wait_us, wake_us, cstamp_off_us);
+                    }
+                }
+                fcb_prev_del = fr_cb.delivery_ns;
+
+                double fcb_elapsed = (double)(fr_now - fcb_report_at)
+                                   / (double)st.performance_frequency;
+                if (fcb_elapsed >= 10.0 && fcbi_n >= 10) {
+                    double i_sd  = (fcbi_n > 1) ? sqrt(fcbi_M2 / (fcbi_n - 1)) : 0.0;
+                    double pw_sd = (pw_n   > 1) ? sqrt(pw_M2   / (pw_n   - 1)) : 0.0;
+                    double w_sd  = (wk_n   > 1) ? sqrt(wk_M2   / (wk_n   - 1)) : 0.0;
+                    double c_sd  = (cs_n   > 1) ? sqrt(cs_M2   / (cs_n   - 1)) : 0.0;
+                    fprintf(stderr,
+                            "[fcb] interval mean=%.3fms \xc2\xb1%.3fms max=%.3fms"
+                            "  poll_wait mean=%.3fms \xc2\xb1%.3fms max=%.3fms"
+                            "  wake mean=%.0f\xc2\xb5s \xc2\xb1%.0f\xc2\xb5s"
+                            "  cstamp off=%.0f\xc2\xb5s \xc2\xb1%.0f\xc2\xb5s\n",
+                            fcbi_mean / 1000.0, i_sd / 1000.0, fcbi_max / 1000.0,
+                            pw_mean / 1000.0, pw_sd / 1000.0, pw_max / 1000.0,
+                            wk_mean, w_sd,
+                            cs_mean, c_sd);
+                    fcbi_n = 0; fcbi_mean = 0.0; fcbi_M2 = 0.0; fcbi_max = 0.0;
+                    pw_n   = 0; pw_mean  = 0.0; pw_M2  = 0.0; pw_max  = 0.0;
+                    wk_n   = 0; wk_mean  = 0.0; wk_M2  = 0.0; wk_max  = 0.0;
+                    cs_n   = 0; cs_mean  = 0.0; cs_M2  = 0.0;
+                    fcb_report_at = fr_now;
+                }
+            }
+
+            if (has_prev_compositor_ms) {
+            } else if (fr_cb.compositor_ms != 0) {
                 prev_compositor_ms = fr_cb.compositor_ms;
                 has_prev_compositor_ms = true;
             }
@@ -5159,6 +5766,19 @@ static int run_freerange_wayland(bool start_muted) {
             if (!repaint_full) {
                 glDisable(GL_SCISSOR_TEST);
             }
+            if (g_debug_mode) {
+                uint64_t gf_t0 = poingo_perf_counter();
+                glFinish();
+                uint64_t gf_t1 = poingo_perf_counter();
+                double gf_ms = (double)(gf_t1 - gf_t0) /
+                               (double)st.performance_frequency * 1000.0;
+                if (gf_log) fprintf(gf_log, "%.3f\n", gf_ms);
+                gf_n++;
+                double gd1 = gf_ms - gf_mean;
+                gf_mean += gd1 / gf_n;
+                gf_M2   += gd1 * (gf_ms - gf_mean);
+                if (gf_ms > gf_max) gf_max = gf_ms;
+            }
             if (pfn_swap_damage) {
                 FreerangeRect swap_dmg = cur_rect;
                 if (damage_hist_depth >= 1) {
@@ -5198,6 +5818,32 @@ static int run_freerange_wayland(bool start_muted) {
                 double ov_ms = get_perf_seconds(tick_start, poingo_perf_counter()) * 1000.0;
                 double non_upload = ov_ms - upload_actual_ms;
                 prev_non_upload_ms = non_upload > 0.0 ? non_upload : 0.0;
+                if (g_debug_mode) {
+                    if (ov_log) fprintf(ov_log, "%.3f\n", ov_ms);
+                    ov_n++;
+                    double od1 = ov_ms - ov_mean;
+                    ov_mean += od1 / ov_n;
+                    ov_M2   += od1 * (ov_ms - ov_mean);
+                    if (ov_ms > ov_max) ov_max = ov_ms;
+                }
+            }
+
+            if (g_debug_mode && has_prev_compositor_ms) {
+                if (!miss_this_frame) normal_count++;
+                uint32_t now_ms = poingo_ticks_ms();
+                if (now_ms - drop_window_start >= 10000) {
+                    bool use_color = isatty(STDERR_FILENO);
+                    double apb_mean = apb_count > 0 ? apb_ms_sum / apb_count : 0.0;
+                    fprintf(stderr, "[drops] %s%dr%s  %s%dy%s  %dok  |  apb mean=%.3fms max=%.3fms\n",
+                            (use_color && drop_red)    ? "\033[91m" : "", drop_red,
+                            (use_color && drop_red)    ? "\033[0m"  : "",
+                            (use_color && drop_yellow) ? "\033[93m" : "", drop_yellow,
+                            (use_color && drop_yellow) ? "\033[0m"  : "",
+                            normal_count, apb_mean, apb_ms_max);
+                    drop_red = drop_yellow = normal_count = 0;
+                    apb_ms_sum = apb_ms_max = 0.0; apb_count = 0;
+                    drop_window_start = now_ms;
+                }
             }
 
         } else {
@@ -5209,6 +5855,48 @@ static int run_freerange_wayland(bool start_muted) {
             }
         }
     } 
+
+    if (g_predict_audit) {
+        static const char *surface_names[BOUNCE_SURFACE_COUNT] = {
+            "floor", "ceiling", "left-wall", "right-wall"
+        };
+        uint64_t expected_total = 0;
+        uint64_t selected_total = 0;
+        uint64_t committed_total = 0;
+        for (int surface = 0; surface < BOUNCE_SURFACE_COUNT; ++surface) {
+            expected_total += g_audit_expected[surface];
+            selected_total += g_audit_selected[surface];
+            committed_total += g_audit_committed[surface];
+            fprintf(stderr,
+                    "predict audit %s: expected=%llu selected=%llu committed=%llu\n",
+                    surface_names[surface],
+                    (unsigned long long)g_audit_expected[surface],
+                    (unsigned long long)g_audit_selected[surface],
+                    (unsigned long long)g_audit_committed[surface]);
+        }
+        fprintf(stderr,
+                "predict audit total: expected=%llu selected=%llu committed=%llu\n",
+                (unsigned long long)expected_total,
+                (unsigned long long)selected_total,
+                (unsigned long long)committed_total);
+    }
+
+    if (fr_log) {
+        fflush(fr_log);
+        fclose(fr_log);
+    }
+    if (ov_log) {
+        fflush(ov_log);
+        fclose(ov_log);
+    }
+    if (gf_log) {
+        fflush(gf_log);
+        fclose(gf_log);
+    }
+    if (fcb_log) {
+        fflush(fcb_log);
+        fclose(fcb_log);
+    }
 
     freerange_gl_shutdown(&st);
     if (st.egl_surface != EGL_NO_SURFACE) {
@@ -5283,6 +5971,8 @@ int main(int argc, char *argv[]) {
             printf("  --light-color <color> Set the light ball color (format: R,G,B or #RRGGBB)\n");
             printf("  --dark-color <color>  Set the dark ball color (format: R,G,B or #RRGGBB)\n");
             printf("  --start-size <scale>  Set initial ball size (0.25 to 2.0)\n");
+            printf("  --audit-predict       Count expected and predicted impacts\n");
+            printf("  --debug               Write performance diagnostics\n");
             printf("  --help, -h            Show this help message\n");
             return 0;
         } else if (strcmp(argv[i], "--mute") == 0 || strcmp(argv[i], "-mute") == 0 || strcmp(argv[i], "mute") == 0) {
@@ -5312,6 +6002,10 @@ int main(int argc, char *argv[]) {
             }
             g_freerange_ball_scale = (float)value;
             i++;
+        } else if (strcmp(argv[i], "--debug") == 0) {
+            g_debug_mode = true;
+        } else if (strcmp(argv[i], "--audit-predict") == 0) {
+            g_predict_audit = true;
         }
     }
 

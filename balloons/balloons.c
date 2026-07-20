@@ -31,6 +31,23 @@
 #define POP_SOUND_VOLUME 32   /* full whack (0-64 scale, typical 8-32) */
 #define BOP_SOUND_VOLUME 14   /* gentle knuckle tap */
 
+static bool g_startup_trace;
+static struct timespec g_startup_t0;
+
+static double startup_elapsed_ms(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)(now.tv_sec - g_startup_t0.tv_sec) * 1000.0 +
+           (double)(now.tv_nsec - g_startup_t0.tv_nsec) * 1e-6;
+}
+
+static void startup_mark(const char *phase) {
+    if (g_startup_trace) {
+        fprintf(stderr, "[balloons startup] %-24s %8.1f ms\n",
+                phase, startup_elapsed_ms());
+    }
+}
+
 typedef struct {
     Anim *anims;
     Anim string_anim;
@@ -396,6 +413,8 @@ typedef struct {
 static float frandf(void) { return (float)rand() / (float)RAND_MAX; }
 static float frandf_sq(void) { float r = frandf(); return r * r; }
 
+static bool g_trace;
+
 #ifndef EGL_BUFFER_AGE_EXT
 #define EGL_BUFFER_AGE_EXT 0x313D
 #endif
@@ -562,6 +581,11 @@ static void lightning_strike(void) {
     g_thunder_dist = dist01;
     g_thunder_delay = THUNDER_MIN_DELAY_S +
                       dist01 * (THUNDER_MAX_DELAY_S - THUNDER_MIN_DELAY_S);
+    if (g_trace) fprintf(stderr,
+                         "[trace] lightning: %d strokes over %.0f ms, dist %.2f, "
+                         "thunder in %.0f ms\n",
+                         g_lightning_nstrokes, (double)g_lightning_total * 1e3,
+                         (double)dist01, (double)g_thunder_delay * 1e3);
 }
 
 static void thunder_update(float dt) {
@@ -1189,6 +1213,7 @@ static void pointer_enter(void *d, struct wl_pointer *p, uint32_t serial,
         wl_pointer_set_cursor(p, serial, g_ctx->cursor_surface,
                               (int)NEEDLE_TIP, (int)NEEDLE_TIP);
     }
+    if (g_trace) fprintf(stderr, "[trace] enter %.0f,%.0f\n", g_ctx->ptr_x, g_ctx->ptr_y);
 }
 static void pointer_leave(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *sf) {
     (void)d; (void)p; (void)serial; (void)sf;
@@ -1284,6 +1309,8 @@ static void pointer_button(void *d, struct wl_pointer *p, uint32_t serial,
     if (button != 0x110 || !pressed) return; 
 
     int hit = sprite_hit(g_ctx->ptr_x, g_ctx->ptr_y);
+    if (g_trace) fprintf(stderr, "[trace] press at %.0f,%.0f hit=%d\n",
+                         g_ctx->ptr_x, g_ctx->ptr_y, hit);
     if (hit >= 0 && !g_sprites[hit].popped)
         pop_sprite(&g_sprites[hit], (float)g_ctx->ptr_x, (float)g_ctx->ptr_y);
 }
@@ -1487,7 +1514,11 @@ int main(int argc, char **argv) {
     const bool pixel = false;
     int nfiles = 0;
 
+    clock_gettime(CLOCK_MONOTONIC, &g_startup_t0);
+    g_startup_trace = getenv("BALLOONS_STARTUP_TRACE") != NULL;
+    startup_mark("begin");
     srand((unsigned)time(NULL) ^ (unsigned)getpid());
+    g_trace = getenv("APNGO_TRACE") != NULL;
     g_storm_countdown = roll_storm_countdown();
 
     StartupJobs startup_jobs = {0};
@@ -1504,6 +1535,8 @@ int main(int argc, char **argv) {
             &startup_jobs.string_anim, &startup_jobs.pop_anims,
             &startup_jobs.pop_count);
     }
+    startup_mark("startup jobs launched");
+
     /* While those jobs run, continue with the independent Wayland/EGL setup
      * below. They are joined before any generated pixels are uploaded. */
     Anim *anims = NULL;
@@ -1529,6 +1562,7 @@ int main(int argc, char **argv) {
     ctx.registry = wl_display_get_registry(ctx.display);
     wl_registry_add_listener(ctx.registry, &registry_listener, &ctx);
     wl_display_roundtrip(ctx.display);
+    startup_mark("Wayland registry");
     if (!ctx.compositor || !ctx.wm_base) {
         fprintf(stderr, "apngo: compositor lacks wl_compositor/xdg_wm_base\n");
         return 1;
@@ -1550,6 +1584,7 @@ int main(int argc, char **argv) {
     g_str_anim = startup_jobs.string_anim;
     g_pop_anims = startup_jobs.pop_anims;
     g_npop_anims = startup_jobs.pop_count;
+    startup_mark("audio and assets ready");
     mark_sounds_dirty(BALLOON_SOUND_SCALE);
     audio_pregen_async();
 
@@ -1559,6 +1594,7 @@ int main(int argc, char **argv) {
     }
 
     g_raspberry = load_raspberry_from_pi();
+    startup_mark("external assets");
 
     ctx.surface = wl_compositor_create_surface(ctx.compositor);
     wl_surface_set_opaque_region(ctx.surface, NULL);
@@ -1585,6 +1621,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "apngo: EGL init failed\n");
         return 1;
     }
+    startup_mark("EGL initialized");
     eglBindAPI(EGL_OPENGL_ES_API);
     EGLint cfg_attr[] = {
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
@@ -1641,6 +1678,7 @@ int main(int argc, char **argv) {
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); 
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
+    startup_mark("GL pipeline");
 
     {
         RingMenuItem items[4] = {
@@ -1739,6 +1777,7 @@ int main(int argc, char **argv) {
             free(g_pop_anims[i].frames[f].rgba);
         }
     }
+    startup_mark("texture uploads");
     
     {
         uint32_t *bg = ghost_icon_create_bg(true);
@@ -1776,6 +1815,7 @@ int main(int argc, char **argv) {
         sprite_roll_anim(s);
         sprite_init(s, mode, scale, speed, ctx.width, ctx.height);
     }
+    startup_mark("scene initialized");
 
     if (g_ghost) {
         struct wl_region *empty = wl_compositor_create_region(ctx.compositor);
@@ -1795,6 +1835,7 @@ int main(int argc, char **argv) {
     float respawn_timer = 10.0f + frandf() * 5.0f;
 
     ctx.need_redraw = true;
+    startup_mark("ready");
     while (ctx.running) {
         if (g_signal_quit == 1 || (!ctx.running && g_quit_fade == 0.0)) {
             g_signal_quit = 2;

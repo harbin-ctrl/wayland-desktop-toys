@@ -36,6 +36,7 @@ checklist is in `../list.todo`.
 --light-color <color>  Light ball color (R,G,B or #RRGGBB)
 --dark-color <color>   Dark ball color (R,G,B or #RRGGBB)
 --start-size <scale>   Initial ball size (0.25 to 2.0)
+--debug                Print FPS to stderr and show the FPS HUD
 --help, -h             Show help
 ```
 
@@ -44,6 +45,7 @@ checklist is in `../list.todo`.
 - `,` / `.` or `<` / `>` speed down / up
 - `[` / `]` size down / up
 - `C` randomize colors
+- `D` toggle debug HUD
 - `SPACE` toggle help
 - `A` enter `nostalgia mode`
 - `P` return to normal Poingo mode
