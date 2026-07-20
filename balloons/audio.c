@@ -3,6 +3,7 @@
 #include "balloon_pop_pcm.h"
 #include "thunder_synth.h"
 #include "toy_audio.h"
+#include "toy_audio_stream.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,14 +14,9 @@
 #include <unistd.h>
 #include <pthread.h>
 
-#ifdef HAVE_CUBEB
-#include <cubeb/cubeb.h>
-#endif
-
 #define PI 3.14159265358979323846f
 
 #define SAMPLE_RATE TOY_AUDIO_SAMPLE_RATE
-#define AUDIO_BUFFER_SIZE 2048
 
 #define AUDIO_NORMALIZE_TARGET TOY_AUDIO_NORMALIZE_TARGET
 #define AUDIO_THUMP_NORMALIZE_TARGET 0.22f
@@ -106,10 +102,7 @@ static WhooshJob g_whoosh_job;
 static bool g_gust_ready = false;   
 static float g_gust_ready_latency = 0.0f;
 
-#ifdef HAVE_CUBEB
-static cubeb *g_cubeb_ctx = NULL;
-static cubeb_stream *g_cubeb_stream = NULL;
-#endif
+static ToyAudioStream *g_audio_stream = NULL;
 
 static void generate_pop_sound(float * restrict buffer, int sample_count,
                                float detune, float size_scale) {
@@ -442,14 +435,10 @@ void play_thunder_sound(float distance01) {
 
 
 static float output_latency_seconds(void) {
-#ifdef HAVE_CUBEB
-    uint32_t frames = 0;
-    if (g_cubeb_stream &&
-        cubeb_stream_get_latency(g_cubeb_stream, &frames) == CUBEB_OK) {
-        float seconds = (float)frames / (float)SAMPLE_RATE;
-        return fminf(fmaxf(seconds, 0.0f), 1.0f);
+    double seconds = 0.0;
+    if (toy_audio_stream_get_latency(g_audio_stream, &seconds)) {
+        return fminf(fmaxf((float)seconds, 0.0f), 1.0f);
     }
-#endif
     return 0.0f;
 }
 
@@ -540,25 +529,13 @@ bool audio_is_muted(void) {
 }
 
 
-#ifdef HAVE_CUBEB
-
-static long cubeb_data_cb(cubeb_stream *stream, void *user,
-                          const void *in, void *out, long nframes) {
-    (void)stream; (void)user; (void)in;
-    if (!out || nframes <= 0) {
-        return nframes;
-    }
+static void balloons_render(void *userdata, float *output,
+                            uint32_t nframes, uint32_t channels) {
+    (void)userdata;
+    (void)channels;
     audio_lock();
-    toy_mixer_render(&g_mixer, (float *)out, (int)nframes, false);
+    toy_mixer_render_stereo(&g_mixer, output, (int)nframes, false);
     audio_unlock();
-    return nframes;
-}
-
-static void cubeb_state_cb(cubeb_stream *stream, void *user, cubeb_state state) {
-    (void)stream; (void)user;
-    if (state == CUBEB_STATE_ERROR) {
-        fprintf(stderr, "balloons: cubeb stream error\n");
-    }
 }
 
 static void *synth_thread_main(void *arg) {
@@ -650,11 +627,8 @@ void audio_shutdown(void) {
         g_gust_ready = false;
     }
 
-    cubeb_stream_stop(g_cubeb_stream);
-    cubeb_stream_destroy(g_cubeb_stream);
-    g_cubeb_stream = NULL;
-    cubeb_destroy(g_cubeb_ctx);
-    g_cubeb_ctx = NULL;
+    toy_audio_stream_stop(g_audio_stream);
+    g_audio_stream = NULL;
     audio_device_open = false;
 
     SamplePair *pairs[3] = { &audio_state.bounce,
@@ -703,38 +677,8 @@ bool audio_init(void) {
         return true;
     }
 
-    if (cubeb_init(&g_cubeb_ctx, "balloons", NULL) != CUBEB_OK || !g_cubeb_ctx) {
-        fprintf(stderr, "balloons: failed to init cubeb; running silent\n");
-        g_cubeb_ctx = NULL;
-        return false;
-    }
-
-    cubeb_stream_params params;
-    memset(&params, 0, sizeof(params));
-    params.format = CUBEB_SAMPLE_FLOAT32NE;
-    params.rate = SAMPLE_RATE;
-    params.channels = 1;
-    params.layout = CUBEB_LAYOUT_MONO;
-    params.prefs = CUBEB_STREAM_PREF_NONE;
-
-    uint32_t latency_frames = 0;
-    if (cubeb_get_min_latency(g_cubeb_ctx, &params, &latency_frames) != CUBEB_OK ||
-        latency_frames == 0) {
-        latency_frames = AUDIO_BUFFER_SIZE;
-    }
-
-    if (cubeb_stream_init(g_cubeb_ctx, &g_cubeb_stream, "balloons",
-                          NULL, NULL, NULL, &params, latency_frames,
-                          cubeb_data_cb, cubeb_state_cb, NULL) != CUBEB_OK ||
-        !g_cubeb_stream) {
-        fprintf(stderr, "balloons: failed to open cubeb stream; running silent\n");
-        cubeb_destroy(g_cubeb_ctx);
-        g_cubeb_ctx = NULL;
-        return false;
-    }
-    audio_device_open = true;
-
     toy_mixer_init(&g_mixer, TOY_AUDIO_DEFAULT_VOLUME);
+    audio_device_open = true;
 
     if (!toy_sample_pair_alloc(&audio_state.bounce,
                                toy_audio_bounce_pair_length()) ||
@@ -797,24 +741,23 @@ bool audio_init(void) {
         fprintf(stderr, "balloons: no synthesis thread; breezes will be silent\n");
     }
 
-    if (cubeb_stream_start(g_cubeb_stream) != CUBEB_OK) {
-        fprintf(stderr, "balloons: failed to start cubeb stream; running silent\n");
+    ToyAudioStreamConfig stream_config = {
+        .name = "balloons",
+        .description = "Balloons",
+        .sample_rate = SAMPLE_RATE,
+        .channels = 2,
+        .render = balloons_render,
+        .userdata = NULL,
+    };
+    g_audio_stream = toy_audio_stream_start(&stream_config);
+    if (!g_audio_stream) {
+        fprintf(stderr,
+                "balloons: failed to start PipeWire stream; running silent\n");
         audio_shutdown();
         return false;
     }
     return true;
 }
-
-#else /* !HAVE_CUBEB: no device — the subsystem compiles to silence */
-
-bool audio_init(void) {
-    fprintf(stderr, "balloons: built without cubeb; running silent\n");
-    return false;
-}
-
-void audio_shutdown(void) {}
-
-#endif /* HAVE_CUBEB */
 
 void audio_shutdown_graceful(void) {
     if (!audio_device_open) {

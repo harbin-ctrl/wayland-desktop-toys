@@ -19,8 +19,8 @@ Wayland Desktop Toys — improvement list
 
 5. Keep dependency handling consistent and non-invasive. [IN PROGRESS]
    Use one project-wide dependency checklist and read-only checks. Do not have
-   build scripts install packages or mutate the host. Cubeb is now the sole
-   external audio backend.
+   build scripts install packages or mutate the host. PipeWire is now the
+   sole external audio backend, managed centrally by toy-audio.
 
 6. Split Poingo into maintainable modules.
    Separate the renderer, physics, audio scheduling, Wayland lifecycle, menus,

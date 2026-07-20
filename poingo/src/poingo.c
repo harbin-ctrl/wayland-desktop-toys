@@ -17,12 +17,9 @@
 #include <pthread.h>
 #include <stdint.h>
 
-#include <pipewire/pipewire.h>
-#include <spa/param/audio/format-utils.h>
-#include <spa/utils/result.h>
-
 #include "ringmenu.h"
 #include "toy_audio.h"
+#include "toy_audio_stream.h"
 #include "lodepng.h"
 #include <stdatomic.h>
 
@@ -943,248 +940,17 @@ static KeyRepeatState g_vol_down_key = {false, 0.0f, 0.0f};
 static KeyRepeatState g_speed_up_key = {false, 0.0f, 0.0f};
 static KeyRepeatState g_speed_down_key = {false, 0.0f, 0.0f};
 
-static struct pw_thread_loop *g_audio_loop = NULL;
-static struct pw_stream *g_audio_stream = NULL;
-static bool g_pipewire_initialized = false;
-static atomic_bool g_audio_streaming = ATOMIC_VAR_INIT(false);
-static atomic_bool g_audio_format_valid = ATOMIC_VAR_INIT(false);
-static atomic_uint_fast64_t g_audio_output_latency_ns = ATOMIC_VAR_INIT(0);
+static ToyAudioStream *g_audio_stream = NULL;
 static bool g_audio_output_latency_valid = false;
 
-static void audio_publish_latency(void) {
-    struct pw_time time_info;
-    if (!g_audio_stream ||
-        pw_stream_get_time_n(g_audio_stream, &time_info,
-                             sizeof(time_info)) < 0 ||
-        time_info.rate.num == 0 || time_info.rate.denom == 0) {
-        return;
-    }
-
-    int64_t now_ns = (int64_t)pw_stream_get_nsec(g_audio_stream);
-    int64_t diff_ns = now_ns > time_info.now
-                          ? now_ns - time_info.now
-                          : 0;
-    int64_t elapsed_ticks =
-        (int64_t)(((uint64_t)time_info.rate.denom *
-                   (uint64_t)diff_ns) /
-                  ((uint64_t)time_info.rate.num * 1000000000ULL));
-    int64_t graph_delay_ticks = time_info.delay - elapsed_ticks;
-    if (graph_delay_ticks < 0) {
-        graph_delay_ticks = 0;
-    }
-
-    double latency_seconds =
-        (double)time_info.queued / (double)SAMPLE_RATE +
-        (double)time_info.buffered / (double)SAMPLE_RATE +
-        (double)graph_delay_ticks * (double)time_info.rate.num /
-            (double)time_info.rate.denom;
-    if (latency_seconds < 0.0) {
-        latency_seconds = 0.0;
-    } else if (latency_seconds > AUDIO_PREDICT_SECONDS) {
-        latency_seconds = AUDIO_PREDICT_SECONDS;
-    }
-    atomic_store_explicit(
-        &g_audio_output_latency_ns,
-        (uint64_t)llround(latency_seconds * 1000000000.0),
-        memory_order_release);
-}
-
 __attribute__((hot))
-static void audio_process_cb(void *user) {
-    (void)user;
-    if (!g_audio_stream) {
-        return;
-    }
-
-    struct pw_buffer *pw_buffer =
-        pw_stream_dequeue_buffer(g_audio_stream);
-    if (!pw_buffer) {
-        return;
-    }
-    if (!pw_buffer->buffer || pw_buffer->buffer->n_datas < 1) {
-        pw_stream_return_buffer(g_audio_stream, pw_buffer);
-        return;
-    }
-
-    struct spa_data *data = &pw_buffer->buffer->datas[0];
-    struct spa_chunk *chunk = data->chunk;
-    const uint32_t stride = 2u * (uint32_t)sizeof(float);
-    uint32_t nframes = data->maxsize / stride;
-    if (pw_buffer->requested > 0 &&
-        pw_buffer->requested < nframes) {
-        nframes = (uint32_t)pw_buffer->requested;
-    }
-
-    audio_publish_latency();
-    if (data->data && nframes > 0 &&
-        atomic_load_explicit(&g_audio_format_valid,
-                             memory_order_acquire)) {
-        audio_lock();
-        toy_mixer_render_stereo(&g_mixer, data->data, (int)nframes,
-                                false);
-        audio_unlock();
-    } else if (data->data && nframes > 0) {
-        memset(data->data, 0, (size_t)nframes * stride);
-    }
-
-    if (!data->data) {
-        nframes = 0;
-    }
-    pw_buffer->size = nframes;
-    if (chunk) {
-        chunk->offset = 0;
-        chunk->stride = (int32_t)stride;
-        chunk->size = nframes * stride;
-    }
-    pw_stream_queue_buffer(g_audio_stream, pw_buffer);
-}
-
-static void audio_param_changed_cb(void *user, uint32_t id,
-                                   const struct spa_pod *param) {
-    (void)user;
-    if (id != SPA_PARAM_Format) {
-        return;
-    }
-    if (!param) {
-        atomic_store_explicit(&g_audio_format_valid, false,
-                              memory_order_release);
-        return;
-    }
-
-    struct spa_audio_info_raw info = {0};
-    bool valid =
-        spa_format_audio_raw_parse(param, &info) >= 0 &&
-        info.format == SPA_AUDIO_FORMAT_F32 &&
-        info.rate == SAMPLE_RATE &&
-        info.channels == 2 &&
-        info.position[0] == SPA_AUDIO_CHANNEL_FL &&
-        info.position[1] == SPA_AUDIO_CHANNEL_FR;
-    atomic_store_explicit(&g_audio_format_valid, valid,
-                          memory_order_release);
-    if (!valid) {
-        fprintf(stderr,
-                "poingo: PipeWire did not negotiate F32 48kHz FL,FR stereo\n");
-    }
-}
-
-static void audio_state_changed_cb(void *user,
-                                   enum pw_stream_state old_state,
-                                   enum pw_stream_state state,
-                                   const char *error) {
-    (void)user;
-    (void)old_state;
-    atomic_store_explicit(&g_audio_streaming,
-                          state == PW_STREAM_STATE_STREAMING,
-                          memory_order_release);
-    if (state == PW_STREAM_STATE_ERROR) {
-        fprintf(stderr, "poingo: PipeWire stream error: %s\n",
-                error ? error : "unknown error");
-    }
-}
-
-static const struct pw_stream_events g_audio_stream_events = {
-    PW_VERSION_STREAM_EVENTS,
-    .state_changed = audio_state_changed_cb,
-    .param_changed = audio_param_changed_cb,
-    .process = audio_process_cb,
-};
-
-static void destroy_pipewire_audio(void) {
-    if (g_audio_loop) {
-        pw_thread_loop_stop(g_audio_loop);
-    }
-    if (g_audio_stream) {
-        pw_stream_destroy(g_audio_stream);
-        g_audio_stream = NULL;
-    }
-    if (g_audio_loop) {
-        pw_thread_loop_destroy(g_audio_loop);
-        g_audio_loop = NULL;
-    }
-    if (g_pipewire_initialized) {
-        pw_deinit();
-        g_pipewire_initialized = false;
-    }
-    atomic_store_explicit(&g_audio_streaming, false,
-                          memory_order_release);
-    atomic_store_explicit(&g_audio_format_valid, false,
-                          memory_order_release);
-    atomic_store_explicit(&g_audio_output_latency_ns, 0,
-                          memory_order_release);
-}
-
-static bool start_pipewire_audio(void) {
-    pw_init(NULL, NULL);
-    g_pipewire_initialized = true;
-
-    g_audio_loop = pw_thread_loop_new("poingo-audio", NULL);
-    if (!g_audio_loop) {
-        fprintf(stderr, "poingo: failed to create PipeWire audio loop\n");
-        destroy_pipewire_audio();
-        return false;
-    }
-
-    struct pw_properties *props = pw_properties_new(
-        PW_KEY_MEDIA_TYPE, "Audio",
-        PW_KEY_MEDIA_CATEGORY, "Playback",
-        PW_KEY_MEDIA_ROLE, "Game",
-        PW_KEY_NODE_NAME, "poingo",
-        PW_KEY_NODE_DESCRIPTION, "Poingo",
-        SPA_KEY_AUDIO_FORMAT, "F32LE",
-        SPA_KEY_AUDIO_RATE, "48000",
-        SPA_KEY_AUDIO_CHANNELS, "2",
-        SPA_KEY_AUDIO_POSITION, "[ FL FR ]",
-        NULL);
-    if (!props) {
-        fprintf(stderr, "poingo: failed to create PipeWire properties\n");
-        destroy_pipewire_audio();
-        return false;
-    }
-    g_audio_stream = pw_stream_new_simple(
-        pw_thread_loop_get_loop(g_audio_loop), "poingo",
-        props, &g_audio_stream_events, NULL);
-    if (!g_audio_stream) {
-        fprintf(stderr, "poingo: failed to create PipeWire stream\n");
-        destroy_pipewire_audio();
-        return false;
-    }
-
-    uint8_t pod_buffer[1024];
-    struct spa_pod_builder builder =
-        SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
-    struct spa_audio_info_raw format = {
-        .format = SPA_AUDIO_FORMAT_F32,
-        .rate = SAMPLE_RATE,
-        .channels = 2,
-        .position = {
-            SPA_AUDIO_CHANNEL_FL,
-            SPA_AUDIO_CHANNEL_FR,
-        },
-    };
-    const struct spa_pod *params[1];
-    params[0] = spa_format_audio_raw_build(
-        &builder, SPA_PARAM_EnumFormat, &format);
-    int connect_result = pw_stream_connect(
-        g_audio_stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
-        PW_STREAM_FLAG_AUTOCONNECT |
-            PW_STREAM_FLAG_MAP_BUFFERS |
-            PW_STREAM_FLAG_RT_PROCESS,
-        params, 1);
-    if (connect_result < 0) {
-        fprintf(stderr, "poingo: failed to connect PipeWire stream: %s\n",
-                spa_strerror(connect_result));
-        destroy_pipewire_audio();
-        return false;
-    }
-
-    int start_result = pw_thread_loop_start(g_audio_loop);
-    if (start_result < 0) {
-        fprintf(stderr, "poingo: failed to start PipeWire audio loop: %s\n",
-                spa_strerror(start_result));
-        destroy_pipewire_audio();
-        return false;
-    }
-    return true;
+static void poingo_audio_render(void *userdata, float *output,
+                                uint32_t nframes, uint32_t channels) {
+    (void)userdata;
+    (void)channels;
+    audio_lock();
+    toy_mixer_render_stereo(&g_mixer, output, (int)nframes, false);
+    audio_unlock();
 }
 
 __attribute__((cold))
@@ -1193,7 +959,8 @@ static void shutdown_audio(void) {
         return;
     }
 
-    destroy_pipewire_audio();
+    toy_audio_stream_stop(g_audio_stream);
+    g_audio_stream = NULL;
     audio_device_open = false;
 
     toy_sample_pair_free(&audio_state.bounce);
@@ -1230,7 +997,16 @@ static bool init_audio(bool start_muted) {
         notify_volume_changed();
     }
 
-    if (!start_pipewire_audio()) {
+    ToyAudioStreamConfig stream_config = {
+        .name = "poingo",
+        .description = "Poingo",
+        .sample_rate = SAMPLE_RATE,
+        .channels = 2,
+        .render = poingo_audio_render,
+        .userdata = NULL,
+    };
+    g_audio_stream = toy_audio_stream_start(&stream_config);
+    if (!g_audio_stream) {
         fprintf(stderr,
                 "poingo: failed to start PipeWire; running silent\n");
         shutdown_audio();
@@ -1744,18 +1520,14 @@ static void audit_actual_collision(bool predictive_pass, int surface,
 static void audio_predict_reset(float now_time);
 
 static void update_audio_output_latency(void) {
-    bool stream_ready =
-        atomic_load_explicit(&g_audio_streaming, memory_order_acquire) &&
-        atomic_load_explicit(&g_audio_format_valid, memory_order_acquire);
-    uint64_t latency_ns = atomic_load_explicit(
-        &g_audio_output_latency_ns, memory_order_acquire);
-    if (!stream_ready || latency_ns == 0) {
+    double latency_seconds = 0.0;
+    if (!toy_audio_stream_get_latency(g_audio_stream,
+                                      &latency_seconds)) {
         g_audio_output_latency_valid = false;
         return;
     }
 
-    g_audio_predict_delay_seconds =
-        (float)((double)latency_ns / 1000000000.0);
+    g_audio_predict_delay_seconds = (float)latency_seconds;
     g_audio_output_latency_valid = true;
     if (g_audio_predict_delay_seconds < 0.0f) {
         g_audio_predict_delay_seconds = 0.0f;

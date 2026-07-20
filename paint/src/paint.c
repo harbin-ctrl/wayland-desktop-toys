@@ -28,13 +28,10 @@
 
 static PFNEGLSWAPBUFFERSWITHDAMAGEEXTPROC g_swap_damage;
 
-#ifdef HAVE_CUBEB
-#include <cubeb/cubeb.h>
-#endif
-
 #include "xdg-shell-client-protocol.h"
 #include "ringmenu.h"
 #include "toy_audio.h"
+#include "toy_audio_stream.h"
 #include "spraycan.h"
 
 #ifndef PI
@@ -1329,11 +1326,8 @@ static void clear_canvas(PaintState *st) {
 }
 
 
-#ifdef HAVE_CUBEB
-
 typedef struct {
-    cubeb *ctx;
-    cubeb_stream *stream;
+    ToyAudioStream *stream;
     pthread_mutex_t mu;
     ToyHiss synth;
     bool spraying;
@@ -1343,60 +1337,37 @@ typedef struct {
 
 static Hiss g_hiss = { .mu = PTHREAD_MUTEX_INITIALIZER };
 
-#define HISS_RATE 44100
+#define HISS_RATE TOY_AUDIO_SAMPLE_RATE
 
-static long hiss_data_cb(cubeb_stream *stream, void *user,
-                         const void *input, void *output, long nframes) {
-    (void)stream;
-    (void)input;
-    Hiss *h = user;
-    if (!h || !output || nframes <= 0) return nframes;
+static void hiss_render(void *userdata, float *output,
+                        uint32_t nframes, uint32_t channels) {
+    Hiss *h = userdata;
+    (void)channels;
+    if (!h || !output || nframes == 0) return;
 
     pthread_mutex_lock(&h->mu);
     toy_hiss_render(&h->synth, output, (int)nframes,
                     h->spraying, h->size, HISS_RATE);
     pthread_mutex_unlock(&h->mu);
-    return nframes;
 }
 
 static void hiss_start(void) {
-    if (cubeb_init(&g_hiss.ctx, "paint", NULL) != CUBEB_OK || !g_hiss.ctx) {
-        fprintf(stderr, "Paint: cubeb unavailable; spraying silently.\n");
-        g_hiss.ctx = NULL;
-        return;
-    }
-
-    cubeb_stream_params params = {0};
-    params.format = CUBEB_SAMPLE_FLOAT32NE;
-    params.rate = HISS_RATE;
-    params.channels = 1;
-    params.layout = CUBEB_LAYOUT_MONO;
-    params.prefs = CUBEB_STREAM_PREF_NONE;
-
-    uint32_t latency_frames = 0;
-    if (cubeb_get_min_latency(g_hiss.ctx, &params, &latency_frames) != CUBEB_OK ||
-        latency_frames == 0) {
-        latency_frames = 512;
-    }
-    if (cubeb_stream_init(g_hiss.ctx, &g_hiss.stream, "paint-hiss",
-                          NULL, NULL, NULL, &params, latency_frames,
-                          hiss_data_cb, NULL, &g_hiss) != CUBEB_OK ||
-        !g_hiss.stream) {
-        fprintf(stderr, "Paint: failed to open cubeb stream; spraying silently.\n");
-        cubeb_destroy(g_hiss.ctx);
-        g_hiss.ctx = NULL;
-        return;
-    }
     toy_hiss_init(&g_hiss.synth);
-    g_hiss.running = true;
-    if (cubeb_stream_start(g_hiss.stream) != CUBEB_OK) {
-        fprintf(stderr, "Paint: failed to start cubeb stream; spraying silently.\n");
-        cubeb_stream_destroy(g_hiss.stream);
-        g_hiss.stream = NULL;
-        cubeb_destroy(g_hiss.ctx);
-        g_hiss.ctx = NULL;
-        g_hiss.running = false;
+    ToyAudioStreamConfig stream_config = {
+        .name = "paint-hiss",
+        .description = "Paint Spray",
+        .sample_rate = HISS_RATE,
+        .channels = 1,
+        .render = hiss_render,
+        .userdata = &g_hiss,
+    };
+    g_hiss.stream = toy_audio_stream_start(&stream_config);
+    if (!g_hiss.stream) {
+        fprintf(stderr,
+                "Paint: failed to start PipeWire stream; spraying silently.\n");
+        return;
     }
+    g_hiss.running = true;
 }
 
 static void hiss_set(bool spraying, float size01) {
@@ -1409,21 +1380,10 @@ static void hiss_set(bool spraying, float size01) {
 
 static void hiss_stop(void) {
     if (!g_hiss.running) return;
-    cubeb_stream_stop(g_hiss.stream);
-    cubeb_stream_destroy(g_hiss.stream);
+    toy_audio_stream_stop(g_hiss.stream);
     g_hiss.stream = NULL;
-    cubeb_destroy(g_hiss.ctx);
-    g_hiss.ctx = NULL;
     g_hiss.running = false;
 }
-
-#else // !HAVE_CUBEB
-
-static void hiss_start(void) {}
-static void hiss_set(bool spraying, float size01) { (void)spraying; (void)size01; }
-static void hiss_stop(void) {}
-
-#endif
 
 
 #define CURSOR_BUF 448

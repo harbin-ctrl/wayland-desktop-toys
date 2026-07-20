@@ -2,6 +2,7 @@
 *.a
 *.d
 bin/
+/toy-audio/test_mixer
 
 .claude/
 .venv/

@@ -19,6 +19,7 @@ PREFIX ?= /usr/local
 PKG_CONFIG ?= pkg-config
 
 include $(DESKTOP_TOYS_DIR)/install.mk
+include $(TOYAUDIO_DIR)/pipewire.mk
 
 # Poingo uses Wayland, EGL/GLES, and xkbcommon.
 WAYLAND_CFLAGS := $(shell $(PKG_CONFIG) --cflags wayland-client wayland-egl egl glesv2 xkbcommon 2>/dev/null)
@@ -27,19 +28,9 @@ ifeq ($(strip $(WAYLAND_LIBS)),)
 WAYLAND_LIBS := -lwayland-client -lwayland-egl -lEGL -lGLESv2 -lxkbcommon
 endif
 
-# PipeWire drives Poingo's audio device; the shared mixer/DSP lives in
-# libtoyaudio.
-PIPEWIRE_CFLAGS_RAW := $(shell $(PKG_CONFIG) --cflags libpipewire-0.3 2>/dev/null)
-PIPEWIRE_LIBS := $(shell $(PKG_CONFIG) --libs libpipewire-0.3 2>/dev/null)
-ifeq ($(strip $(PIPEWIRE_LIBS)),)
-$(error PipeWire development files are required to build poingo)
-endif
-AUDIO_CFLAGS := $(subst -I,-isystem ,$(PIPEWIRE_CFLAGS_RAW))
-AUDIO_LIBS := $(PIPEWIRE_LIBS)
-
 CFLAGS := -std=c11 -Wall -Wextra -Wshadow -pedantic -D_GNU_SOURCE -D_DEFAULT_SOURCE -O2 -fPIC \
-          -I$(CURDIR) -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(AUDIO_CFLAGS)
-LDFLAGS := $(WAYLAND_LIBS) $(AUDIO_LIBS) -lm -lpthread
+          -I$(CURDIR) -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(TOY_AUDIO_PIPEWIRE_CFLAGS)
+LDFLAGS := $(WAYLAND_LIBS) $(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
 .PHONY: all clean run debug icons poingo icon_maker install uninstall install-user uninstall-user
 
@@ -139,7 +130,7 @@ xdg-decoration-unstable-v1-protocol.c:
 	wayland-scanner private-code $(WAYLAND_PROTOCOLS_DIR)/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml $@
 
 src/poingo.o: xdg-shell-client-protocol.h xdg-decoration-unstable-v1-client-protocol.h \
-	$(TOYAUDIO_DIR)/toy_audio.h
+	$(TOYAUDIO_DIR)/toy_audio.h $(TOYAUDIO_DIR)/toy_audio_stream.h
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
