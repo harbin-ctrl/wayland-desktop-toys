@@ -19,44 +19,22 @@ PREFIX ?= /usr/local
 PKG_CONFIG ?= pkg-config
 
 include $(DESKTOP_TOYS_DIR)/install.mk
+include $(TOYAUDIO_DIR)/pipewire.mk
 
-# Spray is a pure-Wayland client: Wayland + EGL/GLES for the overlay, and
-# (optionally) cubeb for the spray-can hiss. No SDL, no toolkit.
+# Spray is a pure-Wayland client: Wayland + EGL/GLES for the overlay and
+# PipeWire for the spray-can hiss. No SDL, no toolkit.
 WAYLAND_CFLAGS := $(shell $(PKG_CONFIG) --cflags wayland-client wayland-egl egl glesv2 2>/dev/null)
 WAYLAND_LIBS := $(shell $(PKG_CONFIG) --libs wayland-client wayland-egl egl glesv2 2>/dev/null)
 ifeq ($(strip $(WAYLAND_LIBS)),)
 WAYLAND_LIBS := -lwayland-client -lwayland-egl -lEGL -lGLESv2
 endif
 
-# The hiss is optional: without cubeb the toy builds silent.
-CUBEB_PREFIX ?= /usr
-CUBEB_CFLAGS := $(shell $(PKG_CONFIG) --cflags libcubeb 2>/dev/null)
-CUBEB_LIBS := $(shell $(PKG_CONFIG) --libs libcubeb 2>/dev/null)
-ifeq ($(strip $(CUBEB_LIBS)),)
-ifneq ($(wildcard $(CUBEB_PREFIX)/include/cubeb/cubeb.h),)
-CUBEB_CFLAGS := -I$(CUBEB_PREFIX)/include
-ifneq ($(wildcard $(CUBEB_PREFIX)/lib64/libcubeb.a),)
-CUBEB_LIBS := $(CUBEB_PREFIX)/lib64/libcubeb.a
-else
-CUBEB_LIBS := -L$(CUBEB_PREFIX)/lib64 -lcubeb
-endif
-endif
-endif
-AUDIO_CFLAGS :=
-AUDIO_LIBS :=
-ifneq ($(strip $(CUBEB_LIBS)),)
-AUDIO_CFLAGS := -DHAVE_CUBEB $(CUBEB_CFLAGS)
-AUDIO_LIBS := $(CUBEB_LIBS) -lstdc++ -ldl
-else
-$(info cubeb not found; building without the spray hiss.)
-endif
-
 # The paint rasterizer is hot float loops; build vectorization-friendly but
 # portable (no -mcpu=native, so the binary can be packaged for other machines).
 CFLAGS := -std=c11 -Wall -Wextra -Wshadow -pedantic -D_GNU_SOURCE -D_DEFAULT_SOURCE \
           -O3 -ffast-math -funroll-loops -fPIC -I$(CURDIR) -I$(RINGMENU_DIR) \
-          -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(AUDIO_CFLAGS)
-LDFLAGS := $(WAYLAND_LIBS) $(AUDIO_LIBS) -lm -lpthread
+          -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(TOY_AUDIO_PIPEWIRE_CFLAGS)
+LDFLAGS := $(WAYLAND_LIBS) $(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
 .PHONY: all clean run icons paint icon_maker install install-user test
 
@@ -75,7 +53,8 @@ xdg-shell-protocol.c:
 	$(WAYLAND_SCANNER) private-code $(WAYLAND_PROTOCOLS_DIR)/stable/xdg-shell/xdg-shell.xml $@
 
 src/paint.o: xdg-shell-client-protocol.h $(RINGMENU_DIR)/ringmenu.h \
-		$(TOYAUDIO_DIR)/toy_audio.h $(GHOSTICON_DIR)/ghost_icon.h
+		$(TOYAUDIO_DIR)/toy_audio.h $(TOYAUDIO_DIR)/toy_audio_stream.h \
+		$(GHOSTICON_DIR)/ghost_icon.h
 
 # The ring menu and audio core live in their own library checkouts; delegate
 # so they rebuild whenever their sources change.
@@ -111,11 +90,14 @@ test: $(BIN_DIR)/test_engine
 
 $(BIN_DIR)/test_engine: test_engine.c src/paint.c spraycan.h \
 		xdg-shell-client-protocol.h $(RINGMENU_LIB) \
-		xdg-shell-protocol.o $(LODEPNG_LIB) $(GHOSTICON_LIB) | $(BIN_DIR)
+		xdg-shell-protocol.o $(LODEPNG_LIB) $(TOYAUDIO_LIB) \
+		$(GHOSTICON_LIB) | $(BIN_DIR)
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE -I$(CURDIR) -I$(RINGMENU_DIR) \
-		-I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng test_engine.c \
+		-I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng \
+		$(TOY_AUDIO_PIPEWIRE_CFLAGS) test_engine.c \
 		$(RINGMENU_LIB) xdg-shell-protocol.o $(LODEPNG_LIB) \
-		$(GHOSTICON_LIB) -o $@ $(WAYLAND_LIBS) -lm -lpthread
+		$(TOYAUDIO_LIB) $(GHOSTICON_LIB) -o $@ $(WAYLAND_LIBS) \
+		$(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
 install: $(BIN_DIR)/paint icons desktop-toys-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"

@@ -81,11 +81,10 @@ noise bands, broad resonances, gentle diffusion, and soft saturation. The
 strike's distance sets how long the thunder lags the flash and how soft it
 lands.
 
-Output goes through [cubeb](https://github.com/mozilla/cubeb) (mono float
-48 kHz), which also provides that latency measurement; on Fedora the
-`cubeb-devel` static library is linked in, so the binary has no extra
-runtime dependencies. If cubeb isn't found at build time the demo builds
-without audio and runs silent.
+Output goes through the native PipeWire stream managed by `libtoyaudio`.
+Balloons sends explicit `FL,FR` floating-point stereo at 48 kHz and reads
+PipeWire's queued, buffered, graph, and device delay for the gust timing
+described above.
 
 ## Performance notes
 

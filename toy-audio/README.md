@@ -1,21 +1,19 @@
 # toy-audio
 
-The shared audio core of the desktop toys (Poingo, balloons): the thunder
+The shared audio core of the desktop toys (Poingo, Balloons, and Paint): the
+native PipeWire playback and latency layer, the thunder
 bounce synthesizer in both styles (Poingo rumble and the nostalgia
 struck-sheet boom with its hall reverb), the milliseconds-scale Schroeder
 "feel" micro-reverb, peak normalization, detuned two-layer sample pairs, and
 the 32-voice snapshot mixer with master volume/mute, soft clip rescue, a
 quit-squelch fade, and the "let it ring out before quitting" quiet tracker.
 
-Extracted after balloons had lifted Poingo's subsystem wholesale; both toys
-now build against this single copy. One `.c`/`.h` pair, no dependencies
-beyond libm and libc.
+Extracted after Balloons had lifted Poingo's subsystem wholesale; all three
+toys now build against this single audio implementation. The DSP depends only
+on libm and libc; the device layer depends on PipeWire.
 
 ## What stays in the toy
 
-- **The audio device.** Both toys play through cubeb. The toy owns its stream
-  and calls `toy_mixer_render()` from its
-  output callback.
 - **The lock.** The mixer does no locking. Claim and commit/cancel a voice
   under the callback mutex, but copy its snapshot between those operations
   without the mutex. A claimed voice is marked preparing and skipped by the
@@ -27,6 +25,17 @@ beyond libm and libc.
 - **Synthesis threading.** Generation takes tens of milliseconds; run it off
   the render thread (balloons uses a worker) and publish finished buffers
   under the audio lock.
+
+## Shared device layer
+
+`toy_audio_stream_start()` creates a native PipeWire stream with strict
+floating-point MONO or `FL,FR` negotiation. It owns the PipeWire loop, mapped
+buffers, stream lifecycle, and timing query. The toy supplies a render
+callback and keeps ownership of its DSP state and synchronization.
+
+The process callback performs no application-side allocation. Latency is
+published atomically and includes queued frames, converter/resampler
+buffering, and the remaining graph/device delay.
 
 ## Build and link
 
@@ -49,8 +58,8 @@ static ToySamplePair bounce;
 toy_mixer_init(&mixer, TOY_AUDIO_DEFAULT_VOLUME);
 toy_sample_pair_alloc(&bounce, toy_audio_bounce_pair_length());
 
-// in the device output callback (mono float 48 kHz)
-lock(); toy_mixer_render(&mixer, out, nframes, false); unlock();
+// render callback supplied to ToyAudioStreamConfig
+lock(); toy_mixer_render_stereo(&mixer, out, nframes, false); unlock();
 
 // on a hit
 if (bounce.dirty) toy_audio_generate_bounce_pair(&bounce, size_scale, style);

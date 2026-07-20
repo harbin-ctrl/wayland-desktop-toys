@@ -48,8 +48,9 @@ it left the can long ago.
 
 ## Building
 
-Needs Wayland + EGL/GLESv2 dev packages, `wayland-scanner`, and (optionally)
-cubeb for the spray-can hiss. Also expects the shared library
+Needs Wayland + EGL/GLESv2 and PipeWire development packages, plus
+`wayland-scanner`. The native PipeWire spray-can hiss is managed by
+`libtoyaudio`. Also expects the shared library
 checkouts `~/ring-menu` (the circular menu) and
 `~/desktop-toys-packaging` (the Desktop Toys menu category); override with
 `RINGMENU_DIR=` / `DESKTOP_TOYS_DIR=`.

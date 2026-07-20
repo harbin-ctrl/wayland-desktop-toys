@@ -4,29 +4,6 @@ CC     ?= gcc
 CFLAGS := -O3 -ffast-math -Wall -pthread $(shell pkg-config --cflags wayland-client wayland-egl egl glesv2)
 LIBS   := $(shell pkg-config --libs wayland-client wayland-egl egl glesv2) -lm -pthread
 
-# cubeb for the audio subsystem (from Poingo): prefer pkg-config, then the
-# distro's headers + static lib (Fedora ships no .pc file); without either
-# the build still works but runs silent.
-CUBEB_PREFIX ?= /usr
-CUBEB_CFLAGS := $(shell pkg-config --cflags libcubeb 2>/dev/null)
-CUBEB_LIBS   := $(shell pkg-config --libs libcubeb 2>/dev/null)
-ifeq ($(strip $(CUBEB_LIBS)),)
-ifneq ($(wildcard $(CUBEB_PREFIX)/include/cubeb/cubeb.h),)
-CUBEB_CFLAGS := -I$(CUBEB_PREFIX)/include
-ifneq ($(wildcard $(CUBEB_PREFIX)/lib64/libcubeb.a),)
-CUBEB_LIBS := $(CUBEB_PREFIX)/lib64/libcubeb.a
-else
-CUBEB_LIBS := -L$(CUBEB_PREFIX)/lib64 -lcubeb
-endif
-endif
-endif
-ifneq ($(strip $(CUBEB_LIBS)),)
-CFLAGS += -DHAVE_CUBEB $(CUBEB_CFLAGS)
-LIBS   += $(CUBEB_LIBS) -lstdc++ -ldl
-else
-$(warning cubeb not found; building without audio)
-endif
-
 TARGET  := balloons
 BIN_DIR := bin
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
@@ -34,6 +11,9 @@ RINGMENU_LIB := $(RINGMENU_DIR)/libringmenu.a
 TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
 DESKTOP_TOYS_DIR ?= $(CURDIR)/../desktop-toys-packaging
 TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
+include $(TOYAUDIO_DIR)/pipewire.mk
+CFLAGS  += $(TOY_AUDIO_PIPEWIRE_CFLAGS)
+LIBS    += $(TOY_AUDIO_PIPEWIRE_LIBS)
 CFLAGS  += -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(CURDIR)/../third_party/lodepng
 GHOSTICON_DIR := $(CURDIR)/../shared
 GHOSTICON_LIB := $(GHOSTICON_DIR)/libghosticon.a
@@ -59,7 +39,8 @@ balloons.o: balloons.c balloon_gen.h audio.h $(RINGMENU_DIR)/ringmenu.h xdg-shel
 balloon_gen.o: balloon_gen.c balloon_gen.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-audio.o: audio.c audio.h $(TOYAUDIO_DIR)/toy_audio.h
+audio.o: audio.c audio.h $(TOYAUDIO_DIR)/toy_audio.h \
+	$(TOYAUDIO_DIR)/toy_audio_stream.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 thunder_synth.o: thunder_synth.c thunder_synth.h
