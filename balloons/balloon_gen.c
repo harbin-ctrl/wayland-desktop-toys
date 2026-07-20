@@ -74,13 +74,18 @@ static void downsample(const uint8_t *high, uint8_t *pixels) {
     const unsigned samples = SUPERSAMPLE * SUPERSAMPLE;
     for (int y = 0; y < FRAME_H; y++) {
         for (int x = 0; x < FRAME_W; x++) {
+            const uint8_t *row0 = high + ((size_t)y * SUPERSAMPLE * HI_W +
+                                          (size_t)x * SUPERSAMPLE) * 4;
+            const uint8_t *row1 = row0 + (size_t)HI_W * 4;
+            const uint8_t *row2 = row1 + (size_t)HI_W * 4;
+            const uint8_t *row3 = row2 + (size_t)HI_W * 4;
+            const uint8_t *p[4] = { row0, row1, row2, row3 };
             unsigned sum[4] = {0, 0, 0, 0};
-            for (int sy = 0; sy < SUPERSAMPLE; sy++) {
-                for (int sx = 0; sx < SUPERSAMPLE; sx++) {
-                    const uint8_t *src =
-                        high + (((size_t)(y * SUPERSAMPLE + sy) * HI_W +
-                                 x * SUPERSAMPLE + sx) * 4);
-                    for (int c = 0; c < 4; c++) sum[c] += src[c];
+            for (int sy = 0; sy < 4; sy++) {
+                const uint8_t *s = p[sy];
+                for (int sx = 0; sx < 4; sx++, s += 4) {
+                    sum[0] += s[0]; sum[1] += s[1];
+                    sum[2] += s[2]; sum[3] += s[3];
                 }
             }
             uint8_t *dst = pixels + ((size_t)y * FRAME_W + x) * 4;
@@ -228,7 +233,8 @@ static void shift_balloon_frame(const uint8_t *base, uint8_t *pixels, int frame)
                     ? base[((size_t)y0 * FRAME_W + x) * 4 + c] : 0;
                 unsigned b = y0 + 1 >= 0 && y0 + 1 < FRAME_H
                     ? base[((size_t)(y0 + 1) * FRAME_W + x) * 4 + c] : 0;
-                dst[c] = (uint8_t)lroundf(a + ((float)b - a) * fraction);
+                float value = a + ((float)b - a) * fraction;
+                dst[c] = (uint8_t)(value < 0.0f ? 0.0f : value > 255.0f ? 255.0f : value + 0.5f);
             }
         }
     }
