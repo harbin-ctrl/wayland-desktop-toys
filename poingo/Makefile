@@ -27,29 +27,15 @@ ifeq ($(strip $(WAYLAND_LIBS)),)
 WAYLAND_LIBS := -lwayland-client -lwayland-egl -lEGL -lGLESv2 -lxkbcommon
 endif
 
-# cubeb drives the audio device; the shared mixer/DSP lives in libtoyaudio.
-CUBEB_PKGCONFIG := $(CURDIR)/third_party/cubeb/install/lib64/pkgconfig
-ifneq ($(wildcard $(CUBEB_PKGCONFIG)/libcubeb.pc),)
-export PKG_CONFIG_PATH := $(CUBEB_PKGCONFIG):$(PKG_CONFIG_PATH)
+# PipeWire drives Poingo's audio device; the shared mixer/DSP lives in
+# libtoyaudio.
+PIPEWIRE_CFLAGS_RAW := $(shell $(PKG_CONFIG) --cflags libpipewire-0.3 2>/dev/null)
+PIPEWIRE_LIBS := $(shell $(PKG_CONFIG) --libs libpipewire-0.3 2>/dev/null)
+ifeq ($(strip $(PIPEWIRE_LIBS)),)
+$(error PipeWire development files are required to build poingo)
 endif
-CUBEB_PREFIX ?= /usr
-CUBEB_CFLAGS := $(shell $(PKG_CONFIG) --cflags libcubeb 2>/dev/null)
-CUBEB_LIBS := $(shell $(PKG_CONFIG) --libs libcubeb 2>/dev/null)
-ifeq ($(strip $(CUBEB_LIBS)),)
-ifneq ($(wildcard $(CUBEB_PREFIX)/include/cubeb/cubeb.h),)
-CUBEB_CFLAGS := -I$(CUBEB_PREFIX)/include
-ifneq ($(wildcard $(CUBEB_PREFIX)/lib64/libcubeb.a),)
-CUBEB_LIBS := $(CUBEB_PREFIX)/lib64/libcubeb.a
-else
-CUBEB_LIBS := -L$(CUBEB_PREFIX)/lib64 -lcubeb
-endif
-endif
-endif
-ifeq ($(strip $(CUBEB_LIBS)),)
-$(error cubeb is required to build poingo)
-endif
-AUDIO_CFLAGS := $(CUBEB_CFLAGS)
-AUDIO_LIBS := $(CUBEB_LIBS) -lstdc++ -ldl
+AUDIO_CFLAGS := $(subst -I,-isystem ,$(PIPEWIRE_CFLAGS_RAW))
+AUDIO_LIBS := $(PIPEWIRE_LIBS)
 
 CFLAGS := -std=c11 -Wall -Wextra -Wshadow -pedantic -D_GNU_SOURCE -D_DEFAULT_SOURCE -O2 -fPIC \
           -I$(CURDIR) -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(AUDIO_CFLAGS)

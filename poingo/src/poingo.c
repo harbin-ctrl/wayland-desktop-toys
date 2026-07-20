@@ -17,7 +17,9 @@
 #include <pthread.h>
 #include <stdint.h>
 
-#include <cubeb/cubeb.h>
+#include <pipewire/pipewire.h>
+#include <spa/param/audio/format-utils.h>
+#include <spa/utils/result.h>
 
 #include "ringmenu.h"
 #include "toy_audio.h"
@@ -173,8 +175,6 @@ static int g_ball_h = 512;
 #define ADV_PER_TICK (PERIOD_FRAMES / (ROT_PERIOD * FPS))
 
 #define SAMPLE_RATE 48000
-#define AUDIO_BUFFER_SIZE 2048
-
 #define MASTER_VOLUME_MIN 0.0f
 #define MASTER_VOLUME_MAX 1.5f
 #define MASTER_VOLUME_STEP 0.05f
@@ -274,27 +274,6 @@ static float axis_vx, axis_vy, axis_vz;
 static float get_audio_predict_effective_delay_seconds(void);
 static float get_audio_predict_horizon_seconds(void);
 static void update_bounce_sound_style_for_mode(void);
-
-typedef struct {
-    uint32_t channels;
-} CubebProbeState;
-
-typedef struct {
-    cubeb *ctx;
-    cubeb_stream *stream;
-    uint32_t rate;
-    uint32_t latency_frames;
-    uint32_t channels;
-    uint32_t start_ticks;
-    uint32_t last_update_ticks;
-    bool active;
-    char backend_id[24];
-} CubebProbeRuntime;
-
-static CubebProbeRuntime g_cubeb_probe = {0};
-static PoingoAtomic g_cubeb_probe_restart_requested;
-
-
 
 typedef struct {
     float lon_norm;
@@ -964,30 +943,248 @@ static KeyRepeatState g_vol_down_key = {false, 0.0f, 0.0f};
 static KeyRepeatState g_speed_up_key = {false, 0.0f, 0.0f};
 static KeyRepeatState g_speed_down_key = {false, 0.0f, 0.0f};
 
-static cubeb *g_audio_ctx = NULL;
-static cubeb_stream *g_audio_stream = NULL;
+static struct pw_thread_loop *g_audio_loop = NULL;
+static struct pw_stream *g_audio_stream = NULL;
+static bool g_pipewire_initialized = false;
+static atomic_bool g_audio_streaming = ATOMIC_VAR_INIT(false);
+static atomic_bool g_audio_format_valid = ATOMIC_VAR_INIT(false);
+static atomic_uint_fast64_t g_audio_output_latency_ns = ATOMIC_VAR_INIT(0);
 static bool g_audio_output_latency_valid = false;
 
-__attribute__((hot))
-static long audio_data_cb(cubeb_stream *stream, void *user,
-                          const void *in, void *out, long nframes) {
-    (void)stream; (void)user; (void)in;
-    if (!out || nframes <= 0) {
-        return nframes;
+static void audio_publish_latency(void) {
+    struct pw_time time_info;
+    if (!g_audio_stream ||
+        pw_stream_get_time_n(g_audio_stream, &time_info,
+                             sizeof(time_info)) < 0 ||
+        time_info.rate.num == 0 || time_info.rate.denom == 0) {
+        return;
     }
-    audio_lock();
-    toy_mixer_render_stereo(&g_mixer, (float *)out, (int)nframes,
-                            false);
-    audio_unlock();
-    return nframes;
+
+    int64_t now_ns = (int64_t)pw_stream_get_nsec(g_audio_stream);
+    int64_t diff_ns = now_ns > time_info.now
+                          ? now_ns - time_info.now
+                          : 0;
+    int64_t elapsed_ticks =
+        (int64_t)(((uint64_t)time_info.rate.denom *
+                   (uint64_t)diff_ns) /
+                  ((uint64_t)time_info.rate.num * 1000000000ULL));
+    int64_t graph_delay_ticks = time_info.delay - elapsed_ticks;
+    if (graph_delay_ticks < 0) {
+        graph_delay_ticks = 0;
+    }
+
+    double latency_seconds =
+        (double)time_info.queued / (double)SAMPLE_RATE +
+        (double)time_info.buffered / (double)SAMPLE_RATE +
+        (double)graph_delay_ticks * (double)time_info.rate.num /
+            (double)time_info.rate.denom;
+    if (latency_seconds < 0.0) {
+        latency_seconds = 0.0;
+    } else if (latency_seconds > AUDIO_PREDICT_SECONDS) {
+        latency_seconds = AUDIO_PREDICT_SECONDS;
+    }
+    atomic_store_explicit(
+        &g_audio_output_latency_ns,
+        (uint64_t)llround(latency_seconds * 1000000000.0),
+        memory_order_release);
 }
 
-static void audio_output_state_cb(cubeb_stream *stream, void *user,
-                                  cubeb_state state) {
-    (void)stream; (void)user;
-    if (state == CUBEB_STATE_ERROR) {
-        fprintf(stderr, "poingo: audio output stream error\n");
+__attribute__((hot))
+static void audio_process_cb(void *user) {
+    (void)user;
+    if (!g_audio_stream) {
+        return;
     }
+
+    struct pw_buffer *pw_buffer =
+        pw_stream_dequeue_buffer(g_audio_stream);
+    if (!pw_buffer) {
+        return;
+    }
+    if (!pw_buffer->buffer || pw_buffer->buffer->n_datas < 1) {
+        pw_stream_return_buffer(g_audio_stream, pw_buffer);
+        return;
+    }
+
+    struct spa_data *data = &pw_buffer->buffer->datas[0];
+    struct spa_chunk *chunk = data->chunk;
+    const uint32_t stride = 2u * (uint32_t)sizeof(float);
+    uint32_t nframes = data->maxsize / stride;
+    if (pw_buffer->requested > 0 &&
+        pw_buffer->requested < nframes) {
+        nframes = (uint32_t)pw_buffer->requested;
+    }
+
+    audio_publish_latency();
+    if (data->data && nframes > 0 &&
+        atomic_load_explicit(&g_audio_format_valid,
+                             memory_order_acquire)) {
+        audio_lock();
+        toy_mixer_render_stereo(&g_mixer, data->data, (int)nframes,
+                                false);
+        audio_unlock();
+    } else if (data->data && nframes > 0) {
+        memset(data->data, 0, (size_t)nframes * stride);
+    }
+
+    if (!data->data) {
+        nframes = 0;
+    }
+    pw_buffer->size = nframes;
+    if (chunk) {
+        chunk->offset = 0;
+        chunk->stride = (int32_t)stride;
+        chunk->size = nframes * stride;
+    }
+    pw_stream_queue_buffer(g_audio_stream, pw_buffer);
+}
+
+static void audio_param_changed_cb(void *user, uint32_t id,
+                                   const struct spa_pod *param) {
+    (void)user;
+    if (id != SPA_PARAM_Format) {
+        return;
+    }
+    if (!param) {
+        atomic_store_explicit(&g_audio_format_valid, false,
+                              memory_order_release);
+        return;
+    }
+
+    struct spa_audio_info_raw info = {0};
+    bool valid =
+        spa_format_audio_raw_parse(param, &info) >= 0 &&
+        info.format == SPA_AUDIO_FORMAT_F32 &&
+        info.rate == SAMPLE_RATE &&
+        info.channels == 2 &&
+        info.position[0] == SPA_AUDIO_CHANNEL_FL &&
+        info.position[1] == SPA_AUDIO_CHANNEL_FR;
+    atomic_store_explicit(&g_audio_format_valid, valid,
+                          memory_order_release);
+    if (!valid) {
+        fprintf(stderr,
+                "poingo: PipeWire did not negotiate F32 48kHz FL,FR stereo\n");
+    }
+}
+
+static void audio_state_changed_cb(void *user,
+                                   enum pw_stream_state old_state,
+                                   enum pw_stream_state state,
+                                   const char *error) {
+    (void)user;
+    (void)old_state;
+    atomic_store_explicit(&g_audio_streaming,
+                          state == PW_STREAM_STATE_STREAMING,
+                          memory_order_release);
+    if (state == PW_STREAM_STATE_ERROR) {
+        fprintf(stderr, "poingo: PipeWire stream error: %s\n",
+                error ? error : "unknown error");
+    }
+}
+
+static const struct pw_stream_events g_audio_stream_events = {
+    PW_VERSION_STREAM_EVENTS,
+    .state_changed = audio_state_changed_cb,
+    .param_changed = audio_param_changed_cb,
+    .process = audio_process_cb,
+};
+
+static void destroy_pipewire_audio(void) {
+    if (g_audio_loop) {
+        pw_thread_loop_stop(g_audio_loop);
+    }
+    if (g_audio_stream) {
+        pw_stream_destroy(g_audio_stream);
+        g_audio_stream = NULL;
+    }
+    if (g_audio_loop) {
+        pw_thread_loop_destroy(g_audio_loop);
+        g_audio_loop = NULL;
+    }
+    if (g_pipewire_initialized) {
+        pw_deinit();
+        g_pipewire_initialized = false;
+    }
+    atomic_store_explicit(&g_audio_streaming, false,
+                          memory_order_release);
+    atomic_store_explicit(&g_audio_format_valid, false,
+                          memory_order_release);
+    atomic_store_explicit(&g_audio_output_latency_ns, 0,
+                          memory_order_release);
+}
+
+static bool start_pipewire_audio(void) {
+    pw_init(NULL, NULL);
+    g_pipewire_initialized = true;
+
+    g_audio_loop = pw_thread_loop_new("poingo-audio", NULL);
+    if (!g_audio_loop) {
+        fprintf(stderr, "poingo: failed to create PipeWire audio loop\n");
+        destroy_pipewire_audio();
+        return false;
+    }
+
+    struct pw_properties *props = pw_properties_new(
+        PW_KEY_MEDIA_TYPE, "Audio",
+        PW_KEY_MEDIA_CATEGORY, "Playback",
+        PW_KEY_MEDIA_ROLE, "Game",
+        PW_KEY_NODE_NAME, "poingo",
+        PW_KEY_NODE_DESCRIPTION, "Poingo",
+        SPA_KEY_AUDIO_FORMAT, "F32LE",
+        SPA_KEY_AUDIO_RATE, "48000",
+        SPA_KEY_AUDIO_CHANNELS, "2",
+        SPA_KEY_AUDIO_POSITION, "[ FL FR ]",
+        NULL);
+    if (!props) {
+        fprintf(stderr, "poingo: failed to create PipeWire properties\n");
+        destroy_pipewire_audio();
+        return false;
+    }
+    g_audio_stream = pw_stream_new_simple(
+        pw_thread_loop_get_loop(g_audio_loop), "poingo",
+        props, &g_audio_stream_events, NULL);
+    if (!g_audio_stream) {
+        fprintf(stderr, "poingo: failed to create PipeWire stream\n");
+        destroy_pipewire_audio();
+        return false;
+    }
+
+    uint8_t pod_buffer[1024];
+    struct spa_pod_builder builder =
+        SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
+    struct spa_audio_info_raw format = {
+        .format = SPA_AUDIO_FORMAT_F32,
+        .rate = SAMPLE_RATE,
+        .channels = 2,
+        .position = {
+            SPA_AUDIO_CHANNEL_FL,
+            SPA_AUDIO_CHANNEL_FR,
+        },
+    };
+    const struct spa_pod *params[1];
+    params[0] = spa_format_audio_raw_build(
+        &builder, SPA_PARAM_EnumFormat, &format);
+    int connect_result = pw_stream_connect(
+        g_audio_stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
+        PW_STREAM_FLAG_AUTOCONNECT |
+            PW_STREAM_FLAG_MAP_BUFFERS |
+            PW_STREAM_FLAG_RT_PROCESS,
+        params, 1);
+    if (connect_result < 0) {
+        fprintf(stderr, "poingo: failed to connect PipeWire stream: %s\n",
+                spa_strerror(connect_result));
+        destroy_pipewire_audio();
+        return false;
+    }
+
+    int start_result = pw_thread_loop_start(g_audio_loop);
+    if (start_result < 0) {
+        fprintf(stderr, "poingo: failed to start PipeWire audio loop: %s\n",
+                spa_strerror(start_result));
+        destroy_pipewire_audio();
+        return false;
+    }
+    return true;
 }
 
 __attribute__((cold))
@@ -996,15 +1193,7 @@ static void shutdown_audio(void) {
         return;
     }
 
-    if (g_audio_stream) {
-        cubeb_stream_stop(g_audio_stream);
-        cubeb_stream_destroy(g_audio_stream);
-        g_audio_stream = NULL;
-    }
-    if (g_audio_ctx) {
-        cubeb_destroy(g_audio_ctx);
-        g_audio_ctx = NULL;
-    }
+    destroy_pipewire_audio();
     audio_device_open = false;
 
     toy_sample_pair_free(&audio_state.bounce);
@@ -1019,43 +1208,8 @@ static void shutdown_audio(void) {
 }
 
 static bool init_audio(bool start_muted) {
-    if (cubeb_init(&g_audio_ctx, "poingo", NULL) != CUBEB_OK || !g_audio_ctx) {
-        fprintf(stderr, "poingo: failed to init cubeb; running silent\n");
-        g_audio_ctx = NULL;
-        return false;
-    }
-
-    cubeb_stream_params params;
-    memset(&params, 0, sizeof(params));
-    params.format = CUBEB_SAMPLE_FLOAT32NE;
-    params.rate = SAMPLE_RATE;
-    params.channels = 2;   
-    params.layout = CUBEB_LAYOUT_STEREO;
-    params.prefs = CUBEB_STREAM_PREF_NONE;
-
-    uint32_t latency_frames = 0;
-    if (cubeb_get_min_latency(g_audio_ctx, &params, &latency_frames) != CUBEB_OK ||
-        latency_frames == 0) {
-        latency_frames = AUDIO_BUFFER_SIZE;
-    }
-
-    if (cubeb_stream_init(g_audio_ctx, &g_audio_stream, "poingo",
-                          NULL, NULL, NULL, &params, latency_frames,
-                          audio_data_cb, audio_output_state_cb, NULL) != CUBEB_OK ||
-        !g_audio_stream) {
-        fprintf(stderr, "poingo: failed to open cubeb stream; running silent\n");
-        cubeb_destroy(g_audio_ctx);
-        g_audio_ctx = NULL;
-        return false;
-    }
-    audio_device_open = true;
-
     toy_mixer_init(&g_mixer, TOY_AUDIO_DEFAULT_VOLUME);
-    if (start_muted) {
-        g_mixer.muted = true;
-        g_mixer.master_volume = 0.0f;
-        notify_volume_changed();
-    }
+    audio_device_open = true;
 
     if (!toy_sample_pair_alloc(&audio_state.bounce,
                                toy_audio_bounce_pair_length())) {
@@ -1070,8 +1224,15 @@ static bool init_audio(bool start_muted) {
         return false;
     }
 
-    if (cubeb_stream_start(g_audio_stream) != CUBEB_OK) {
-        fprintf(stderr, "poingo: failed to start cubeb stream; running silent\n");
+    if (start_muted) {
+        g_mixer.muted = true;
+        g_mixer.master_volume = 0.0f;
+        notify_volume_changed();
+    }
+
+    if (!start_pipewire_audio()) {
+        fprintf(stderr,
+                "poingo: failed to start PipeWire; running silent\n");
         shutdown_audio();
         return false;
     }
@@ -1582,131 +1743,20 @@ static void audit_actual_collision(bool predictive_pass, int surface,
 
 static void audio_predict_reset(float now_time);
 
-static long cubeb_silence_cb(cubeb_stream *stream, void *user, const void *in,
-                             void *out, long nframes) {
-    (void)stream;
-    (void)in;
-    CubebProbeRuntime *state = (CubebProbeRuntime *)user;
-    if (!out || !state || state->channels == 0) {
-        return nframes;
-    }
-    size_t samples = (size_t)nframes * (size_t)state->channels;
-    memset(out, 0, samples * sizeof(float));
-    return nframes;
-}
-
-static void cubeb_state_cb(cubeb_stream *stream, void *user, cubeb_state state) {
-    (void)stream;
-    (void)user;
-    (void)state;
-}
-
-static void probe_cubeb_stop(void) {
-    if (g_cubeb_probe.stream) {
-        cubeb_stream_stop(g_cubeb_probe.stream);
-        cubeb_stream_destroy(g_cubeb_probe.stream);
-        g_cubeb_probe.stream = NULL;
-    }
-    if (g_cubeb_probe.ctx) {
-        cubeb_destroy(g_cubeb_probe.ctx);
-        g_cubeb_probe.ctx = NULL;
-    }
-    g_cubeb_probe.rate = 0;
-    g_cubeb_probe.latency_frames = 0;
-    g_cubeb_probe.channels = 0;
-    g_cubeb_probe.active = false;
-    snprintf(g_cubeb_probe.backend_id, sizeof(g_cubeb_probe.backend_id), "unknown");
-}
-
-static void probe_cubeb_start(void) {
-    if (g_cubeb_probe.active) {
-        return;
-    }
-
-    cubeb *ctx = NULL;
-    if (cubeb_init(&ctx, "poingo-latency-probe", NULL) != CUBEB_OK || !ctx) {
-        return;
-    }
-
-    uint32_t rate = SAMPLE_RATE;
-    if (cubeb_get_preferred_sample_rate(ctx, &rate) != CUBEB_OK || rate == 0) {
-        rate = SAMPLE_RATE;
-    }
-
-    cubeb_stream_params params;
-    memset(&params, 0, sizeof(params));
-    params.format = CUBEB_SAMPLE_FLOAT32NE;
-    params.rate = rate;
-    params.channels = 1;
-    params.layout = CUBEB_LAYOUT_MONO;
-
-    uint32_t latency_frames = 0;
-    if (cubeb_get_min_latency(ctx, &params, &latency_frames) != CUBEB_OK || latency_frames == 0) {
-        latency_frames = rate / 50;  
-    }
-
-    cubeb_stream *stream = NULL;
-    if (cubeb_stream_init(ctx, &stream, "poingo-probe",
-                          NULL, NULL,
-                          NULL, &params,
-                          latency_frames,
-                          cubeb_silence_cb, cubeb_state_cb,
-                          &g_cubeb_probe) != CUBEB_OK || !stream) {
-        cubeb_destroy(ctx);
-        return;
-    }
-
-    if (cubeb_stream_start(stream) != CUBEB_OK) {
-        cubeb_stream_destroy(stream);
-        cubeb_destroy(ctx);
-        return;
-    }
-
-    g_cubeb_probe.ctx = ctx;
-    g_cubeb_probe.stream = stream;
-    g_cubeb_probe.rate = rate;
-    g_cubeb_probe.latency_frames = latency_frames;
-    g_cubeb_probe.channels = params.channels;
-    g_cubeb_probe.start_ticks = poingo_ticks_ms();
-    g_cubeb_probe.last_update_ticks = g_cubeb_probe.start_ticks;
-    const char *backend_id = cubeb_get_backend_id(ctx);
-    if (backend_id) {
-        snprintf(g_cubeb_probe.backend_id, sizeof(g_cubeb_probe.backend_id), "%s", backend_id);
-    } else {
-        snprintf(g_cubeb_probe.backend_id, sizeof(g_cubeb_probe.backend_id), "unknown");
-    }
-    g_cubeb_probe.active = true;
-}
-
-static void __attribute__((unused)) probe_cubeb_handle_restart(void) {
-    if (poingo_atomic_set(&g_cubeb_probe_restart_requested, 0) == 0) {
-        return;
-    }
-    probe_cubeb_stop();
-    g_audio_predict_delay_seconds = AUDIO_PREDICT_DELAY_SECONDS;
-    g_cubeb_probe.start_ticks = 0;
-    g_cubeb_probe.last_update_ticks = 0;
-    probe_cubeb_start();
-}
-
 static void update_audio_output_latency(void) {
-    static uint32_t last_update_ticks = 0;
-    if (!g_audio_stream) {
+    bool stream_ready =
+        atomic_load_explicit(&g_audio_streaming, memory_order_acquire) &&
+        atomic_load_explicit(&g_audio_format_valid, memory_order_acquire);
+    uint64_t latency_ns = atomic_load_explicit(
+        &g_audio_output_latency_ns, memory_order_acquire);
+    if (!stream_ready || latency_ns == 0) {
+        g_audio_output_latency_valid = false;
         return;
     }
-    uint32_t now_ticks = poingo_ticks_ms();
-    if (last_update_ticks != 0 && now_ticks - last_update_ticks < 250u) {
-        return;
-    }
-    last_update_ticks = now_ticks;
 
-    uint32_t measured_latency = 0;
-    if (cubeb_stream_get_latency(g_audio_stream, &measured_latency) == CUBEB_OK &&
-        measured_latency > 0) {
-        g_audio_predict_delay_seconds =
-            (float)measured_latency / (float)SAMPLE_RATE;
-        g_audio_output_latency_valid = true;
-    }
+    g_audio_predict_delay_seconds =
+        (float)((double)latency_ns / 1000000000.0);
+    g_audio_output_latency_valid = true;
     if (g_audio_predict_delay_seconds < 0.0f) {
         g_audio_predict_delay_seconds = 0.0f;
     } else if (g_audio_predict_delay_seconds > AUDIO_PREDICT_SECONDS) {
