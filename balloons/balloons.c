@@ -512,8 +512,8 @@ static float g_lightning_total;
 static float g_flash01;              
 static float g_dry_flash_delay;      
 
-#define THUNDER_MIN_DELAY_S 0.18f    /* even a near strike isn't instant */
-#define THUNDER_MAX_DELAY_S 2.60f    /* a far one rolls in this much later */
+#define THUNDER_MIN_DELAY_S 0.85f
+#define THUNDER_MAX_DELAY_S 3.60f
 static float g_thunder_delay = -1.f; 
 static float g_thunder_dist;         
 
@@ -590,7 +590,9 @@ static void storm_new_leg(bool first) {
     if (g_storm_leg_timer > g_storm_timer) {
         g_storm_leg_timer = g_storm_timer;
     }
-    play_whoosh_async(1.0f, g_storm_leg_timer, 2.5f, false);
+    /* Storm wind is the continuous bed; keep enough headroom for lightning's
+     * thunder to move decisively into the foreground. */
+    play_whoosh_async(1.0f, g_storm_leg_timer, 1.5f, false);
 }
 
 static void start_storm(void) {
@@ -1725,7 +1727,11 @@ int main(int argc, char **argv) {
         wl_region_destroy(empty);
     }
 
-    if (getenv("BALLOONS_TEST_STORM")) start_storm(); 
+    if (getenv("BALLOONS_TEST_STORM")) start_storm();
+    if (getenv("BALLOONS_TEST_THUNDER")) {
+        start_storm();
+        lightning_strike();
+    }
 
     struct timespec ts_prev;
     clock_gettime(CLOCK_MONOTONIC, &ts_prev);

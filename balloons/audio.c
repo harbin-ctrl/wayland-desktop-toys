@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "audio.h"
 #include "balloon_pop_pcm.h"
+#include "thunder_synth.h"
 #include "toy_audio.h"
 
 #include <stdio.h>
@@ -25,8 +26,8 @@
 #define AUDIO_THUMP_NORMALIZE_TARGET 0.22f
 #define POP_SOUND_SECONDS 0.35f
 #define THUMP_SOUND_SECONDS 0.8f
-#define THUNDER_BASE_VOLUME    0.5f
-#define THUNDER_DISTANCE_ATTEN 0.55f
+#define THUNDER_BASE_VOLUME    0.90f
+#define THUNDER_DISTANCE_ATTEN 0.35f
 #define THUNDER_CLIP_COUNT     4
 #define THUNDER_CLIP_SECONDS   12
 #define WHOOSH_MAX_GUST_SECONDS 9.0f
@@ -655,49 +656,14 @@ void audio_shutdown(void) {
     audio_state.current_size_scale = 1.0f;
 }
 
-static uint32_t thunder_random(uint32_t *state) {
-    *state = *state * 1664525u + 1013904223u;
-    return *state;
-}
-
-static float thunder_random_unit(uint32_t *state) {
-    return ((thunder_random(state) >> 8) & 0x00ffffffu) / 8388607.5f - 1.0f;
-}
-
-/* A runtime equivalent of the old Python/SciPy asset generator: layered
- * low-passed noise, irregular strike envelopes, and slow rumble modulation.
- * Keeping it here avoids both stored PCM and a resampling pass. */
 static bool build_thunder_clip(SamplePair *pair, int clip_index) {
     const int out_len = THUNDER_CLIP_SECONDS * SAMPLE_RATE;
     if (!toy_sample_pair_alloc(pair, out_len)) {
         return false;
     }
-    uint32_t state = 0x7f4a7c15u + (uint32_t)clip_index * 0x9e3779b9u;
-    float low_a = 0.0f, low_b = 0.0f, rumble = 0.0f;
-    const int strike_count = 4 + (int)(thunder_random(&state) % 5);
-    float strike_time[8], strike_gain[8], strike_decay[8];
-    for (int i = 0; i < strike_count; i++) {
-        strike_time[i] = 0.6f + (float)(thunder_random(&state) % 5800) / 1000.0f;
-        strike_gain[i] = 0.40f + (float)(thunder_random(&state) % 61) / 100.0f;
-        strike_decay[i] = 1.5f + (float)(thunder_random(&state) % 251) / 100.0f;
-    }
-    for (int sample = 0; sample < out_len; sample++) {
-        float white = thunder_random_unit(&state);
-        low_a += 0.020f * (white - low_a);
-        low_b += 0.020f * (low_a - low_b);
-        rumble += 0.00040f * (thunder_random_unit(&state) - rumble);
-        float t = (float)sample / SAMPLE_RATE;
-        float envelope = 0.05f + 0.18f * fabsf(rumble);
-        for (int i = 0; i < strike_count; i++) {
-            float age = t - strike_time[i];
-            if (age >= 0.0f) {
-                float attack = fminf(age / 0.08f, 1.0f);
-                envelope += strike_gain[i] * attack * expf(-age / strike_decay[i]);
-            }
-        }
-        pair->data1[sample] = fmaxf(-1.0f, fminf(1.0f, low_b * envelope * 2.8f));
-    }
-    memcpy(pair->data2, pair->data1, (size_t)out_len * sizeof(*pair->data1));
+    uint32_t seed = 0x7f4a7c15u + (uint32_t)clip_index * 0x9e3779b9u;
+    thunder_synthesize(pair->data1, out_len, SAMPLE_RATE, seed, clip_index, 0);
+    thunder_synthesize(pair->data2, out_len, SAMPLE_RATE, seed, clip_index, 1);
     pair->dirty = false;
     return true;
 }
