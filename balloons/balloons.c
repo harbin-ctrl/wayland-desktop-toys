@@ -719,6 +719,7 @@ static void breeze_update(float dt) {
 #define BALLOON_BODY_CX (36.0f / 72.0f)
 #define BALLOON_BODY_CY (34.0f / 128.0f)
 #define BALLOON_BOB_FRAC (3.0f / 128.0f)
+#define GHOST_BALLOON_BODY_HEIGHT_FRAC 0.70f
 #define RASPBERRY_FRAC 0.26f           /* logo width as a fraction of sprite width */
 #define RASPBERRY_CHANCE (1.0f / 300.0f)
 #define RASPBERRY_ALPHA 0.6f           /* ink opacity: lets the balloon show through */
@@ -1990,7 +1991,8 @@ int main(int argc, char **argv) {
             const Anim *ghost_anim = &g_anims[0];
             const float source_body_height =
                 (float)(g_ghost_balloon_bounds.max_y - g_ghost_balloon_bounds.min_y + 1);
-            const float body_scale = (GHOST_ICON_SIZE * 0.78f) / source_body_height;
+            const float body_scale =
+                (GHOST_ICON_SIZE * GHOST_BALLOON_BODY_HEIGHT_FRAC) / source_body_height;
             const float bw = ghost_anim->w * body_scale;
             const float bh = ghost_anim->h * body_scale;
             const float source_center_x =
