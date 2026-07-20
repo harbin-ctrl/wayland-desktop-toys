@@ -30,6 +30,23 @@
 #define POP_SOUND_VOLUME 32   /* full whack (0-64 scale, typical 8-32) */
 #define BOP_SOUND_VOLUME 14   /* gentle knuckle tap */
 
+static bool g_startup_trace;
+static struct timespec g_startup_t0;
+
+static double startup_elapsed_ms(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)(now.tv_sec - g_startup_t0.tv_sec) * 1000.0 +
+           (double)(now.tv_nsec - g_startup_t0.tv_nsec) * 1e-6;
+}
+
+static void startup_mark(const char *phase) {
+    if (g_startup_trace) {
+        fprintf(stderr, "[balloons startup] %-24s %8.1f ms\n",
+                phase, startup_elapsed_ms());
+    }
+}
+
 
 typedef struct {
     int min_x, min_y;
@@ -1472,11 +1489,15 @@ int main(int argc, char **argv) {
     const bool pixel = false;
     int nfiles = 0;
 
+    clock_gettime(CLOCK_MONOTONIC, &g_startup_t0);
+    g_startup_trace = getenv("BALLOONS_STARTUP_TRACE") != NULL;
+    startup_mark("begin");
     srand((unsigned)time(NULL) ^ (unsigned)getpid());
     g_trace = getenv("APNGO_TRACE") != NULL;
     g_storm_countdown = roll_storm_countdown();
 
     audio_init();
+    startup_mark("audio initialized");
     mark_sounds_dirty(BALLOON_SOUND_SCALE); 
     audio_pregen_async();                   
 
@@ -1486,12 +1507,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "balloons: failed to generate runtime assets\n");
         return 1;
     }
+    startup_mark("procedural assets");
     if (!find_alpha_bounds(&anims[0], &g_ghost_balloon_bounds)) {
         fprintf(stderr, "balloons: unable to measure ghost icon source\n");
         return 1;
     }
 
     g_raspberry = load_raspberry_from_pi();
+    startup_mark("external assets");
 
     Ctx ctx = {0};
     g_ctx = &ctx;
@@ -1510,6 +1533,7 @@ int main(int argc, char **argv) {
     ctx.registry = wl_display_get_registry(ctx.display);
     wl_registry_add_listener(ctx.registry, &registry_listener, &ctx);
     wl_display_roundtrip(ctx.display);
+    startup_mark("Wayland registry");
     if (!ctx.compositor || !ctx.wm_base) {
         fprintf(stderr, "apngo: compositor lacks wl_compositor/xdg_wm_base\n");
         return 1;
@@ -1542,6 +1566,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "apngo: EGL init failed\n");
         return 1;
     }
+    startup_mark("EGL initialized");
     eglBindAPI(EGL_OPENGL_ES_API);
     EGLint cfg_attr[] = {
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
@@ -1598,6 +1623,7 @@ int main(int argc, char **argv) {
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); 
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
+    startup_mark("GL pipeline");
 
     {
         RingMenuItem items[4] = {
@@ -1696,6 +1722,7 @@ int main(int argc, char **argv) {
             free(g_pop_anims[i].frames[f].rgba);
         }
     }
+    startup_mark("texture uploads");
     
     {
         uint32_t *bg = ghost_icon_create_bg(true);
@@ -1733,6 +1760,7 @@ int main(int argc, char **argv) {
         sprite_roll_anim(s);
         sprite_init(s, mode, scale, speed, ctx.width, ctx.height);
     }
+    startup_mark("scene initialized");
 
     if (g_ghost) {
         struct wl_region *empty = wl_compositor_create_region(ctx.compositor);
@@ -1752,6 +1780,7 @@ int main(int argc, char **argv) {
     float respawn_timer = 10.0f + frandf() * 5.0f;
 
     ctx.need_redraw = true;
+    startup_mark("ready");
     while (ctx.running) {
         if (g_signal_quit == 1 || (!ctx.running && g_quit_fade == 0.0)) {
             g_signal_quit = 2;
