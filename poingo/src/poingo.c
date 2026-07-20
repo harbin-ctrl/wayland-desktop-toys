@@ -8,38 +8,20 @@
 #include <limits.h>
 #include <signal.h>
 #include <time.h>
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif
-#if defined(__unix__)
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <errno.h>
-#include <dirent.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <poll.h>
-#if defined(__linux__)
-#include <sys/syscall.h>
 #include <linux/memfd.h>
-#endif
 #include <pthread.h>
-#endif
 #include <stdint.h>
 
-
-#if defined(HAVE_CUBEB)
 #include <cubeb/cubeb.h>
-#endif
 
 #include "ringmenu.h"
 #include "toy_audio.h"
 #include "lodepng.h"
-
 #include <stdatomic.h>
 
 
@@ -128,13 +110,10 @@ static uint8_t g_picker_color[3];
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
-#include "xdg-shell-client-protocol.h"
 #include <linux/input.h>
 #include <linux/input-event-codes.h>
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
-#include "lodepng.h"
-#include "ringmenu.h"
 #include "ghost_icon.h"
 
 #define WINDOW_WIDTH 640
@@ -203,7 +182,7 @@ static int g_ball_h = 512;
 #define VOLUME_HUD_HOLD_TIME 1.5f
 
 #define MIN_BOUNCE_SOUND_SPEED_RATIO 0.4f
-#define BOUNCE_DEBOUNCE_SECONDS 0.095f  // Legacy upper bound for predictive bounce dedupe
+#define BOUNCE_DEBOUNCE_SECONDS 0.095f
 #define RECENT_BOUNCE_PLAYBACK_COUNT 12
 #define AUDIO_SHUTDOWN_CHECK_MS 100u
 #define AUDIO_SHUTDOWN_MAX_MS 2000u
@@ -226,30 +205,6 @@ static const float AUDIO_RESCALE_MIN = 0.1f;
 static const float AUDIO_RESCALE_MAX = 1.0f;
 #define VOLUME_HUD_FADE_TIME 0.5f
 
-typedef enum {
-    DECOR_KIND_CLOSE = 0,
-    DECOR_KIND_FULLSCREEN,
-    DECOR_KIND_RESIZE
-} DecorKind;
-
-typedef enum {
-    INTERACTION_IDLE = 0,
-    INTERACTION_BALL_DRAG,
-    INTERACTION_WINDOW_DRAG,
-    INTERACTION_RESIZE_DRAG,
-    INTERACTION_DECOR_PRESS
-} InteractionMode;
-
-typedef struct {
-    InteractionMode mode;
-    DecorKind decor_kind;  
-    int pointer_x;
-    int pointer_y;
-    bool button_down;
-} InteractionState;
-
-
-static bool g_freerange_trace = false;
 static volatile sig_atomic_t g_freerange_quit_requested = 0;
 static float g_floor_y_normalized = FLOOR_Y_NORMALIZED;
 static float g_target_peak_y = TARGET_PEAK_Y;
@@ -288,7 +243,6 @@ static void poingo_menu_sync_drops(void) {
 }
 static bool g_a_mode = false;
 static float g_ball_tilt_deg = 15.0f;
-static bool g_background_needs_refresh = false;
 
 static uint32_t gcd_u32(uint32_t a, uint32_t b);
 static void regen_make_shuffled_order(uint32_t *order, uint32_t total);
@@ -317,12 +271,10 @@ static float axis_ax, axis_ay, axis_az;
 static float axis_ux, axis_uy, axis_uz;
 static float axis_vx, axis_vy, axis_vz;
 
-static InteractionState g_interaction_state;
 static float get_audio_predict_effective_delay_seconds(void);
 static float get_audio_predict_horizon_seconds(void);
 static void update_bounce_sound_style_for_mode(void);
 
-#if defined(HAVE_CUBEB)
 typedef struct {
     uint32_t channels;
 } CubebProbeState;
@@ -341,25 +293,6 @@ typedef struct {
 
 static CubebProbeRuntime g_cubeb_probe = {0};
 static PoingoAtomic g_cubeb_probe_restart_requested;
-#endif
-
-static inline bool interaction_is_ball_drag(void) {
-    return g_interaction_state.mode == INTERACTION_BALL_DRAG;
-}
-
-static inline void interaction_begin_ball_drag(int pointer_x, int pointer_y) {
-    g_interaction_state.mode = INTERACTION_BALL_DRAG;
-    g_interaction_state.pointer_x = pointer_x;
-    g_interaction_state.pointer_y = pointer_y;
-    g_interaction_state.button_down = true;
-}
-
-static inline void interaction_end_ball_drag(void) {
-    if (g_interaction_state.mode == INTERACTION_BALL_DRAG) {
-        g_interaction_state.mode = INTERACTION_IDLE;
-        g_interaction_state.button_down = false;
-    }
-}
 
 
 
@@ -436,7 +369,6 @@ static bool set_a_mode_enabled(bool enabled) {
     compute_axis_vectors();
     update_bounce_sound_style_for_mode();
     invalidate_sphere_pixel_cache();
-    g_background_needs_refresh = true;
     return true;
 }
 
@@ -615,50 +547,13 @@ static bool ensure_sphere_pixel_cache(int size) {
 }
 
 static double get_perf_seconds(uint64_t start_counter, uint64_t end_counter) {
-    uint64_t freq = poingo_perf_freq();
-    if (freq == 0 || end_counter < start_counter) {
+    if (end_counter < start_counter) {
         return 0.0;
     }
-    return (double)(end_counter - start_counter) / (double)freq;
+    return (double)(end_counter - start_counter) / 1000000000.0;
 }
 
 
-
-__attribute__((hot))
-static void generate_sphere_pixels(uint8_t * restrict pixels, const int size, const float phase_offset) {
-    if (!pixels) return;
-
-    if (!sphere_cache || sphere_cache_size != size) {
-        return;
-    }
-
-    memset(pixels, 0, (size_t)size * size * 4);
-
-    float phase_norm = phase_offset * (1.0f / (2.0f * PI));
-    size_t total_pixels = (size_t)size * (size_t)size;
-
-    for (size_t i = 0; i < total_pixels; i++) {
-        const SpherePixelCache *c = &sphere_cache[i];
-        if (!c->valid) {
-            continue;
-        }
-
-        float lon_norm = c->lon_norm + phase_norm;
-        lon_norm -= floorf(lon_norm);
-
-        int u = (int)(lon_norm * (float)LON_TILES);
-        if (u >= LON_TILES) u = LON_TILES - 1;
-
-        bool is_light = ((u + c->lat_index) & 1) == 0;
-        const uint8_t *src = is_light ? c->light_rgb : c->dark_rgb;
-
-        size_t idx = i * 4;
-        pixels[idx + 0] = src[0];
-        pixels[idx + 1] = src[1];
-        pixels[idx + 2] = src[2];
-        pixels[idx + 3] = 255;
-    }
-}
 
 __attribute__((hot))
 static void generate_sphere_pixels_band(uint8_t * restrict pixels,
@@ -704,6 +599,12 @@ static void generate_sphere_pixels_band(uint8_t * restrict pixels,
             row[idx + 3] = 255;
         }
     }
+}
+
+__attribute__((hot))
+static void generate_sphere_pixels(uint8_t * restrict pixels, const int size,
+                                   const float phase_offset) {
+    generate_sphere_pixels_band(pixels, size, phase_offset, 0, size);
 }
 
 __attribute__((hot))
@@ -951,32 +852,6 @@ typedef struct {
     bool valid;
 } RecentBouncePlayback;
 
-typedef struct {
-    unsigned long long actual_collisions_total;
-    unsigned long long actual_audible_total;
-    unsigned long long actual_soft_total;
-    unsigned long long predict_window_total;
-    unsigned long long predict_soft_total;
-    unsigned long long predict_deduped_total;
-    unsigned long long predict_played_total;
-    unsigned long long actual_collisions_window;
-    unsigned long long actual_audible_window;
-    unsigned long long actual_soft_window;
-    unsigned long long predict_window_events_window;
-    unsigned long long predict_soft_window;
-    unsigned long long predict_deduped_window;
-    unsigned long long predict_played_window;
-    float window_start_time;
-    float last_log_time;
-    bool overlay_enabled;
-} AudioDebugStats;
-
-typedef struct {
-    uint32_t current_buttons;
-    uint8_t last_button;
-    uint8_t last_state;
-} MouseDebugState;
-
 AudioState audio_state = {
     .bounce = { NULL, NULL, 0, true },
     .pending_size_scale = 1.0f,
@@ -1000,7 +875,7 @@ static void update_bounce_sound_style_for_mode(void) {
 }
 
 static AudioPredictBuffer g_audio_predict = {0};
-static AudioPredictQueueEntry g_audio_predict_queue[AUDIO_PREDICT_QUEUE_MAX] = {{0}};
+static AudioPredictQueueEntry g_audio_predict_queue[AUDIO_PREDICT_QUEUE_MAX] = {0};
 static float g_audio_sim_time = 0.0f;
 static float g_audio_predict_delay_seconds = AUDIO_PREDICT_DELAY_SECONDS;
 static float g_audio_predict_step_seconds = 1.0f / (float)FPS;
@@ -1013,15 +888,6 @@ enum {
 };
 static RecentBouncePlayback g_recent_bounce_playbacks[RECENT_BOUNCE_PLAYBACK_COUNT] = {{0}};
 static int g_recent_bounce_playback_next = 0;
-static AudioDebugStats g_audio_debug = {
-    .window_start_time = -1000000.0f,
-    .last_log_time = -1000000.0f,
-    .overlay_enabled = false
-};
-static bool g_predictive_audio_enabled = true;
-static bool g_audio_trace_enabled = false;
-
-
 static bool audio_is_perceptually_quiet(void) {
     if (!audio_device_open) {
         return true;
@@ -1039,8 +905,6 @@ static void adjust_master_volume(float delta);
 static void set_master_mute(bool mute);
 static void toggle_master_mute(void);
 static void update_volume_hud(float delta_seconds);
-static void update_fps_hud(float delta_seconds);
-static bool should_block_input(void);
 
 static inline void window_coords_to_render(int logical_x, int logical_y,
                                            int logical_w, int logical_h,
@@ -1081,56 +945,6 @@ static bool g_suppress_hud = false;
 static float g_freerange_ball_scale = 1.0f;
 static bool g_debug_mode = false;  
 
-typedef enum {
-    BANNER_SHOWING,      
-    BANNER_HOLDING,      
-    BANNER_FADING,       
-    BANNER_HIDDEN        
-} BannerState;
-
-typedef struct {
-    BannerState state;
-    float alpha;              
-    float timer;              
-    bool block_input;         
-    float pulse_timer;        
-    bool user_requested;      
-} LoadingBanner;
-
-static LoadingBanner g_loading_banner = {
-    .state = BANNER_HIDDEN,
-    .alpha = 0.0f,
-    .timer = 0.0f,
-    .block_input = false,
-    .pulse_timer = 0.0f,
-    .user_requested = false
-};
-
-static void android_append_downloads_trace_line(const char *line);
-
-#define BANNER_MINIMUM_TIME 8.0f   // Minimum time banner stays visible (seconds)
-#define BANNER_FADE_TIME 0.5f       // Fade out duration (seconds)
-
-
-
-
-static void android_append_downloads_trace_line(const char *line) {
-    (void)line;
-}
-
-
-static bool show_fps_hud = false;
-#define FPS_HUD_FADE_TIME 0.3f
-#define FPS_SAMPLE_COUNT 60
-static float fps_hud_alpha = 0.0f;
-static float fps_hud_target_alpha = 0.0f;
-
-
-
-
-// NOTE FOR FUTURE POINGO WORK:
-
-
 typedef struct {
     bool is_pressed;
     float hold_time;
@@ -1142,16 +956,6 @@ static KeyRepeatState g_vol_down_key = {false, 0.0f, 0.0f};
 static KeyRepeatState g_speed_up_key = {false, 0.0f, 0.0f};
 static KeyRepeatState g_speed_down_key = {false, 0.0f, 0.0f};
 
-#if defined(__unix__)
-
-#endif
-enum {
-    CONSOLE_ESC_NONE = 0,
-    CONSOLE_ESC_ESC,
-    CONSOLE_ESC_ESC_BRACKET
-};
-
-#if defined(HAVE_CUBEB)
 static cubeb *g_audio_ctx = NULL;
 static cubeb_stream *g_audio_stream = NULL;
 
@@ -1164,7 +968,7 @@ static long audio_data_cb(cubeb_stream *stream, void *user,
     }
     audio_lock();
     toy_mixer_render_stereo(&g_mixer, (float *)out, (int)nframes,
-                            should_block_input());
+                            false);
     audio_unlock();
     return nframes;
 }
@@ -1176,7 +980,6 @@ static void audio_output_state_cb(cubeb_stream *stream, void *user,
         fprintf(stderr, "poingo: audio output stream error\n");
     }
 }
-#endif
 
 __attribute__((cold))
 static void shutdown_audio(void) {
@@ -1184,7 +987,6 @@ static void shutdown_audio(void) {
         return;
     }
 
-#if defined(HAVE_CUBEB)
     if (g_audio_stream) {
         cubeb_stream_stop(g_audio_stream);
         cubeb_stream_destroy(g_audio_stream);
@@ -1194,7 +996,6 @@ static void shutdown_audio(void) {
         cubeb_destroy(g_audio_ctx);
         g_audio_ctx = NULL;
     }
-#endif
     audio_device_open = false;
 
     toy_sample_pair_free(&audio_state.bounce);
@@ -1208,11 +1009,6 @@ static void shutdown_audio(void) {
 }
 
 static bool init_audio(bool start_muted) {
-#if !defined(HAVE_CUBEB)
-    (void)start_muted;
-    fprintf(stderr, "poingo: built without cubeb; running silent\n");
-    return false;
-#else
     if (cubeb_init(&g_audio_ctx, "poingo", NULL) != CUBEB_OK || !g_audio_ctx) {
         fprintf(stderr, "poingo: failed to init cubeb; running silent\n");
         g_audio_ctx = NULL;
@@ -1270,7 +1066,6 @@ static bool init_audio(bool start_muted) {
         return false;
     }
     return true;
-#endif
 }
 
 void play_bounce_sound(int volume, float pan) {
@@ -1596,15 +1391,6 @@ static float measure_text(const char *text, float scale) {
 
 
 
-static inline void update_fps_hud(float delta_seconds) {
-    fps_hud_target_alpha = show_fps_hud ? 1.0f : 0.0f;
-
-    if (fps_hud_alpha < fps_hud_target_alpha) {
-        fps_hud_alpha = fminf(fps_hud_target_alpha, fps_hud_alpha + delta_seconds / FPS_HUD_FADE_TIME);
-    } else if (fps_hud_alpha > fps_hud_target_alpha) {
-        fps_hud_alpha = fmaxf(fps_hud_target_alpha, fps_hud_alpha - delta_seconds / FPS_HUD_FADE_TIME);
-    }
-}
 
 
 
@@ -1613,11 +1399,6 @@ static inline void update_fps_hud(float delta_seconds) {
 
 
 
-static bool should_block_input(void) {
-    return g_loading_banner.state == BANNER_SHOWING ||
-           g_loading_banner.state == BANNER_HOLDING ||
-           g_loading_banner.state == BANNER_FADING;
-}
 
 
 
@@ -1695,7 +1476,7 @@ void calculate_equilibrium_state(int window_w, int window_h,
     *out_bounce_speed = bounce_speed;
 }
 
-static float get_ideal_bounce_vy(int window_h, float ball_diameter_normalized, float gravity) {
+static float get_ideal_bounce_vy(float ball_diameter_normalized, float gravity) {
     float bounce_height = g_floor_y_normalized - g_target_peak_y - ball_diameter_normalized;
     if (bounce_height < 0.0001f) {
         bounce_height = 0.0001f;
@@ -1718,7 +1499,7 @@ static bool impact_speed_is_audible(float impact_speed, float baseline_speed) {
 static void update_ball_physics(float *ball_x, float *ball_y,
                                 float *ball_vx, float *ball_vy,
                                 int *ball_vx_direction,
-                                int window_w, int window_h,
+                                int window_w,
                                 float border_inset, float border_inset_norm,
                                 float ball_diameter, float ball_diameter_normalized,
                                 double sim_delta,
@@ -1755,16 +1536,8 @@ static void maybe_play_actual_bounce_sound(bool make_noise, float impact_speed, 
     play_bounce_sound(volume_from_impact_ratio(ratio), pan);
 }
 
-static void audio_trace_event(const char *stage,
-                              int surface,
-                              float event_time,
-                              float impact_speed,
-                              float baseline_speed,
-                              int volume);
-static void audio_debug_note_predict_soft_reject(float event_time);
 static void audio_predict_reset(float now_time);
 
-#if defined(HAVE_CUBEB)
 static long cubeb_silence_cb(cubeb_stream *stream, void *user, const void *in,
                              void *out, long nframes) {
     (void)stream;
@@ -1898,12 +1671,6 @@ static void probe_cubeb_update(void) {
         g_audio_predict_delay_seconds = AUDIO_PREDICT_SECONDS;
     }
 }
-#else
-static void probe_cubeb_start(void) {
-}
-static void probe_cubeb_update(void) {
-}
-#endif
 
 static inline void append_bounce_event(BounceEvent *events, int *event_count, int max_events,
                                        float event_time, float impact_speed, float baseline_speed,
@@ -1912,8 +1679,6 @@ static inline void append_bounce_event(BounceEvent *events, int *event_count, in
         return;
     }
     if (!impact_speed_is_audible(impact_speed, baseline_speed)) {
-        audio_trace_event("PRED_SOFT", surface, event_time, impact_speed, baseline_speed, -1);
-        audio_debug_note_predict_soft_reject(event_time);
         return;
     }
     float ratio = impact_speed / baseline_speed;
@@ -1922,7 +1687,6 @@ static inline void append_bounce_event(BounceEvent *events, int *event_count, in
     events[*event_count].volume = volume;
     events[*event_count].surface = surface;
     events[*event_count].pan = pan;
-    audio_trace_event("PRED_ADD", surface, event_time, impact_speed, baseline_speed, volume);
     (*event_count)++;
 }
 
@@ -1935,138 +1699,6 @@ static float get_bounce_dedupe_window_seconds(void) {
         dedupe_window = BOUNCE_DEBOUNCE_SECONDS;
     }
     return dedupe_window;
-}
-
-static const char *bounce_surface_name(int surface) {
-    switch (surface) {
-        case BOUNCE_SURFACE_FLOOR: return "FLOOR";
-        case BOUNCE_SURFACE_CEILING: return "CEIL";
-        case BOUNCE_SURFACE_LEFT: return "LEFT";
-        case BOUNCE_SURFACE_RIGHT: return "RIGHT";
-        default: return "UNK";
-    }
-}
-
-static void audio_trace_event(const char *stage,
-                              int surface,
-                              float event_time,
-                              float impact_speed,
-                              float baseline_speed,
-                              int volume) {
-    if (!g_audio_trace_enabled || !stage) {
-        return;
-    }
-    float ratio = 0.0f;
-    char line[256];
-    if (baseline_speed > 0.0f) {
-        ratio = impact_speed / baseline_speed;
-    }
-    snprintf(line, sizeof(line),
-             "AUDIOTRACE %s MODE=%s SURF=%s T=%.4f IMP=%.6f BASE=%.6f R=%.4f VOL=%d",
-             stage,
-             g_predictive_audio_enabled ? "PRED" : "REAL",
-             bounce_surface_name(surface),
-             event_time,
-             impact_speed,
-             baseline_speed,
-             ratio,
-             volume);
-    fprintf(stderr, "%s\n", line);
-    android_append_downloads_trace_line(line);
-}
-
-static void audio_debug_ensure_window(float now_time) {
-    if (g_audio_debug.window_start_time < -999999.0f) {
-        g_audio_debug.window_start_time = now_time;
-    }
-    if (g_audio_debug.last_log_time < -999999.0f) {
-        g_audio_debug.last_log_time = now_time;
-    }
-}
-
-static void audio_debug_note_actual_collision(float event_time, float impact_speed, float baseline_speed) {
-    audio_debug_ensure_window(event_time);
-    g_audio_debug.actual_collisions_total++;
-    g_audio_debug.actual_collisions_window++;
-    if (impact_speed_is_audible(impact_speed, baseline_speed)) {
-        g_audio_debug.actual_audible_total++;
-        g_audio_debug.actual_audible_window++;
-    } else {
-        g_audio_debug.actual_soft_total++;
-        g_audio_debug.actual_soft_window++;
-    }
-}
-
-static void audio_debug_note_predict_soft_reject(float event_time) {
-    audio_debug_ensure_window(event_time);
-    g_audio_debug.predict_soft_total++;
-    g_audio_debug.predict_soft_window++;
-}
-
-static void audio_debug_note_predict_window_event(float event_time) {
-    audio_debug_ensure_window(event_time);
-    g_audio_debug.predict_window_total++;
-    g_audio_debug.predict_window_events_window++;
-}
-
-static void audio_debug_note_predict_deduped(float event_time) {
-    audio_debug_ensure_window(event_time);
-    g_audio_debug.predict_deduped_total++;
-    g_audio_debug.predict_deduped_window++;
-}
-
-static void audio_debug_note_predict_played(float event_time) {
-    audio_debug_ensure_window(event_time);
-    g_audio_debug.predict_played_total++;
-    g_audio_debug.predict_played_window++;
-}
-
-static void audio_debug_maybe_log(float now_time) {
-    audio_debug_ensure_window(now_time);
-    if (!g_audio_trace_enabled) {
-        return;
-    }
-    if ((now_time - g_audio_debug.last_log_time) < 1.0f) {
-        return;
-    }
-
-    unsigned long long miss_window = 0;
-    if (g_audio_debug.actual_audible_window > g_audio_debug.predict_played_window) {
-        miss_window = g_audio_debug.actual_audible_window - g_audio_debug.predict_played_window;
-    }
-
-    {
-        char line[256];
-        snprintf(line, sizeof(line),
-                 "AUDIODBG W A=%llu AU=%llu AS=%llu PW=%llu PS=%llu PD=%llu PP=%llu MISS=%llu | T A=%llu AU=%llu AS=%llu PW=%llu PS=%llu PD=%llu PP=%llu",
-                 g_audio_debug.actual_collisions_window,
-                 g_audio_debug.actual_audible_window,
-                 g_audio_debug.actual_soft_window,
-                 g_audio_debug.predict_window_events_window,
-                 g_audio_debug.predict_soft_window,
-                 g_audio_debug.predict_deduped_window,
-                 g_audio_debug.predict_played_window,
-                 miss_window,
-                 g_audio_debug.actual_collisions_total,
-                 g_audio_debug.actual_audible_total,
-                 g_audio_debug.actual_soft_total,
-                 g_audio_debug.predict_window_total,
-                 g_audio_debug.predict_soft_total,
-                 g_audio_debug.predict_deduped_total,
-                 g_audio_debug.predict_played_total);
-        fprintf(stderr, "%s\n", line);
-        android_append_downloads_trace_line(line);
-    }
-
-    g_audio_debug.actual_collisions_window = 0;
-    g_audio_debug.actual_audible_window = 0;
-    g_audio_debug.actual_soft_window = 0;
-    g_audio_debug.predict_window_events_window = 0;
-    g_audio_debug.predict_soft_window = 0;
-    g_audio_debug.predict_deduped_window = 0;
-    g_audio_debug.predict_played_window = 0;
-    g_audio_debug.window_start_time = now_time;
-    g_audio_debug.last_log_time = now_time;
 }
 
 static bool recent_bounce_playback_matches(const BounceEvent *ev) {
@@ -2229,7 +1861,6 @@ static void audio_predict_reset(float now_time) {
         g_recent_bounce_playbacks[i].valid = false;
     }
     g_recent_bounce_playback_next = 0;
-    audio_debug_ensure_window(now_time);
 }
 
 static float get_audio_predict_effective_delay_seconds(void) {
@@ -2264,7 +1895,7 @@ static void build_audio_predict_buffer(AudioPredictBuffer *buffer,
                                        float ball_x, float ball_y,
                                        float ball_vx, float ball_vy,
                                        int ball_vx_direction,
-                                       int window_w, int window_h,
+                                       int window_w,
                                        float border_inset, float border_inset_norm,
                                        float ball_diameter, float ball_diameter_normalized,
                                        float step_seconds) {
@@ -2291,7 +1922,7 @@ static void build_audio_predict_buffer(AudioPredictBuffer *buffer,
         update_ball_physics(&sim_x, &sim_y,
                             &sim_vx, &sim_vy,
                             &sim_dir,
-                            window_w, window_h,
+                            window_w,
                             border_inset, border_inset_norm,
                             ball_diameter, ball_diameter_normalized,
                             step,
@@ -2307,8 +1938,6 @@ static void trigger_predictive_audio_with_timing(const AudioPredictBuffer *buffe
                                                  bool make_noise,
                                                  float *timing_error_out,
                                                  bool *timing_valid_out) {
-    audio_debug_maybe_log(now_time);
-
     if (timing_error_out) {
         *timing_error_out = 0.0f;
     }
@@ -2342,20 +1971,13 @@ static void trigger_predictive_audio_with_timing(const AudioPredictBuffer *buffe
             continue;
         }
 
-        audio_debug_note_predict_window_event(event_time);
-        audio_trace_event("PRED_WIN", ev->surface, event_time, 0.0f, 0.0f, ev->volume);
-
         if (recent_bounce_playback_matches(ev)) {
-            audio_trace_event("PRED_DEDUP", ev->surface, event_time, 0.0f, 0.0f, ev->volume);
-            audio_debug_note_predict_deduped(event_time);
             entry->played = true;
             continue;
         }
 
         play_bounce_sound(ev->volume, ev->pan);
-        audio_trace_event("PRED_PLAY", ev->surface, event_time, 0.0f, 0.0f, ev->volume);
         record_recent_bounce_playback(ev);
-        audio_debug_note_predict_played(event_time);
         entry->played = true;
 
         float expected_play_time = event_time + effective_delay;
@@ -2381,7 +2003,7 @@ static void trigger_predictive_audio(const AudioPredictBuffer *buffer, float now
 static void update_ball_physics(float *ball_x, float *ball_y,
                                 float *ball_vx, float *ball_vy,
                                 int *ball_vx_direction,
-                                int window_w, int window_h,
+                                int window_w,
                                 float border_inset, float border_inset_norm,
                                 float ball_diameter, float ball_diameter_normalized,
                                 double sim_delta,
@@ -2422,12 +2044,6 @@ static void update_ball_physics(float *ball_x, float *ball_y,
                                 fabsf(*ball_vx), natural_vx,
                                 BOUNCE_SURFACE_LEFT, pan);
         } else {
-            audio_debug_note_actual_collision(event_time, fabsf(*ball_vx), natural_vx);
-            audio_trace_event("ACTUAL_HIT", BOUNCE_SURFACE_LEFT, event_time, fabsf(*ball_vx), natural_vx, -1);
-            if (immediate_audio_pass && impact_speed_is_audible(fabsf(*ball_vx), natural_vx)) {
-                audio_trace_event("REAL_PLAY", BOUNCE_SURFACE_LEFT, event_time, fabsf(*ball_vx), natural_vx,
-                                  volume_from_impact_ratio(fabsf(*ball_vx) / natural_vx));
-            }
             maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(*ball_vx), natural_vx, pan);
         }
     }
@@ -2441,12 +2057,6 @@ static void update_ball_physics(float *ball_x, float *ball_y,
                                 fabsf(*ball_vx), natural_vx,
                                 BOUNCE_SURFACE_RIGHT, pan);
         } else {
-            audio_debug_note_actual_collision(event_time, fabsf(*ball_vx), natural_vx);
-            audio_trace_event("ACTUAL_HIT", BOUNCE_SURFACE_RIGHT, event_time, fabsf(*ball_vx), natural_vx, -1);
-            if (immediate_audio_pass && impact_speed_is_audible(fabsf(*ball_vx), natural_vx)) {
-                audio_trace_event("REAL_PLAY", BOUNCE_SURFACE_RIGHT, event_time, fabsf(*ball_vx), natural_vx,
-                                  volume_from_impact_ratio(fabsf(*ball_vx) / natural_vx));
-            }
             maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(*ball_vx), natural_vx, pan);
         }
     }
@@ -2455,19 +2065,13 @@ static void update_ball_physics(float *ball_x, float *ball_y,
         *ball_y = border_inset_norm + (border_inset_norm - *ball_y);
         *ball_vy = -*ball_vy;
         float impact_vy = fabsf(*ball_vy);
-        float ideal_vy = get_ideal_bounce_vy(window_h, ball_diameter_normalized, gravity);
+        float ideal_vy = get_ideal_bounce_vy(ball_diameter_normalized, gravity);
         float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
         if (predictive_pass) {
             append_bounce_event(events, event_count, max_events, event_time,
                                 impact_vy, ideal_vy,
                                 BOUNCE_SURFACE_CEILING, pan);
         } else {
-            audio_debug_note_actual_collision(event_time, impact_vy, ideal_vy);
-            audio_trace_event("ACTUAL_HIT", BOUNCE_SURFACE_CEILING, event_time, impact_vy, ideal_vy, -1);
-            if (immediate_audio_pass && impact_speed_is_audible(impact_vy, ideal_vy)) {
-                audio_trace_event("REAL_PLAY", BOUNCE_SURFACE_CEILING, event_time, impact_vy, ideal_vy,
-                                  volume_from_impact_ratio(impact_vy / ideal_vy));
-            }
             maybe_play_actual_bounce_sound(immediate_audio_pass, impact_vy, ideal_vy, pan);
         }
     }
@@ -2479,7 +2083,7 @@ static void update_ball_physics(float *ball_x, float *ball_y,
 
         *ball_vy = -*ball_vy;
 
-        float ideal_vy = get_ideal_bounce_vy(window_h, ball_diameter_normalized, gravity);
+        float ideal_vy = get_ideal_bounce_vy(ball_diameter_normalized, gravity);
 
         float vy_difference = fabsf(*ball_vy) - ideal_vy;
         if (fabsf(vy_difference) > 0.0001f) {
@@ -2495,12 +2099,6 @@ static void update_ball_physics(float *ball_x, float *ball_y,
                                 fabsf(impact_vy), ideal_vy,
                                 BOUNCE_SURFACE_FLOOR, pan);
         } else {
-            audio_debug_note_actual_collision(event_time, fabsf(impact_vy), ideal_vy);
-            audio_trace_event("ACTUAL_HIT", BOUNCE_SURFACE_FLOOR, event_time, fabsf(impact_vy), ideal_vy, -1);
-            if (immediate_audio_pass && impact_speed_is_audible(fabsf(impact_vy), ideal_vy)) {
-                audio_trace_event("REAL_PLAY", BOUNCE_SURFACE_FLOOR, event_time, fabsf(impact_vy), ideal_vy,
-                                  volume_from_impact_ratio(fabsf(impact_vy) / ideal_vy));
-            }
             maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(impact_vy), ideal_vy, pan);
         }
     }
@@ -3333,10 +2931,6 @@ static void ball_cursor_render_frames(void) {
 
     int bx0 = (int)(cx - radius) - 1, bx1 = (int)(cx + radius) + 2;
     int by0 = bx0, by1 = bx1;
-    if (bx0 < 0) bx0 = 0;
-    if (by0 < 0) by0 = 0;
-    if (bx1 > size) bx1 = size;
-    if (by1 > size) by1 = size;
 
     float light_x = -0.3f, light_y = -0.5f, light_z = 1.0f;
     float inv_len = 1.0f / sqrtf(light_x * light_x + light_y * light_y +
@@ -4138,34 +3732,28 @@ static void freerange_update_input_region(struct wl_compositor *compositor,
     wl_region_destroy(region);
 }
 
-static bool freerange_generate_frames(FreedomFrameSet *out_frames, int frame_count, float angle_period) {
-    if (!out_frames || frame_count <= 0) {
-        return false;
-    }
+typedef struct {
+    int sphere_size;
+    int shadow_size;
+    int shadow_offset_x;
+    int shadow_offset_y;
+} FreerangeFrameGeometry;
 
+static bool freerange_prepare_frame_geometry(FreerangeFrameGeometry *geometry) {
     compute_axis_vectors();
 
     const int sphere_texture_size = BALL_W;
-    const float canonical_total_prop = 1.0f;
-    const float canonical_ball_diameter = 124.0f * canonical_total_prop;
+    const float canonical_ball_diameter = 124.0f;
     const float canonical_ball_radius = canonical_ball_diameter * 0.5f;
-    const float shadow_offset_x_screen = canonical_total_prop * 8.0f * 0.6f;
-    const float shadow_offset_y_screen = canonical_total_prop * 8.0f * 1.0f;
-    const float shadow_size_screen = canonical_ball_diameter * 1.1f + 20.0f * canonical_total_prop;
+    const float shadow_offset_x_screen = 8.0f * 0.6f;
+    const float shadow_offset_y_screen = 8.0f;
+    const float shadow_size_screen = canonical_ball_diameter * 1.1f + 20.0f;
 
     const float scale_to_texture = sphere_texture_size / canonical_ball_diameter;
-    float desired_shadow_width_pixels = shadow_size_screen * scale_to_texture;
-    int desired_shadow_size = (int)ceilf(desired_shadow_width_pixels);
+    int shadow_size = (int)ceilf(shadow_size_screen * scale_to_texture);
 
     if (!ensure_sphere_pixel_cache(sphere_texture_size)) {
         fprintf(stderr, "Failed to build sphere pixel cache\n");
-        return false;
-    }
-
-    int shadow_w = 0, shadow_h = 0;
-    uint8_t *shadow_pixels = generate_shadow_pixels(desired_shadow_size, &shadow_w, &shadow_h);
-    if (!shadow_pixels) {
-        fprintf(stderr, "Failed to generate shadow texture\n");
         return false;
     }
 
@@ -4176,16 +3764,38 @@ static bool freerange_generate_frames(FreedomFrameSet *out_frames, int frame_cou
 
     const float min_x = fminf(0.0f, shadow_x_tex);
     const float min_y = fminf(0.0f, shadow_y_tex);
-    const float max_x = fmaxf((float)sphere_texture_size, shadow_x_tex + shadow_w);
-    const float max_y = fmaxf((float)sphere_texture_size, shadow_y_tex + shadow_h);
+    const float max_x = fmaxf((float)sphere_texture_size, shadow_x_tex + shadow_size);
+    const float max_y = fmaxf((float)sphere_texture_size, shadow_y_tex + shadow_size);
 
     g_frame_texture_w = (int)ceilf(max_x - min_x);
     g_frame_texture_h = (int)ceilf(max_y - min_y);
     g_ball_texture_offset_x = (int)lroundf(-min_x);
     g_ball_texture_offset_y = (int)lroundf(-min_y);
 
-    int shadow_offset_x = (int)lroundf(shadow_x_tex + g_ball_texture_offset_x);
-    int shadow_offset_y = (int)lroundf(shadow_y_tex + g_ball_texture_offset_y);
+    geometry->sphere_size = sphere_texture_size;
+    geometry->shadow_size = shadow_size;
+    geometry->shadow_offset_x = (int)lroundf(shadow_x_tex + g_ball_texture_offset_x);
+    geometry->shadow_offset_y = (int)lroundf(shadow_y_tex + g_ball_texture_offset_y);
+    return true;
+}
+
+static bool freerange_generate_frames(FreedomFrameSet *out_frames, int frame_count, float angle_period) {
+    if (!out_frames || frame_count <= 0) {
+        return false;
+    }
+
+    FreerangeFrameGeometry geometry;
+    if (!freerange_prepare_frame_geometry(&geometry)) {
+        return false;
+    }
+
+    int shadow_w = 0, shadow_h = 0;
+    uint8_t *shadow_pixels = generate_shadow_pixels(
+        geometry.shadow_size, &shadow_w, &shadow_h);
+    if (!shadow_pixels) {
+        fprintf(stderr, "Failed to generate shadow texture\n");
+        return false;
+    }
 
     size_t frame_size = (size_t)g_frame_texture_w * (size_t)g_frame_texture_h * 4;
     size_t total_frame_bytes = frame_size * (size_t)frame_count;
@@ -4199,7 +3809,7 @@ static bool freerange_generate_frames(FreedomFrameSet *out_frames, int frame_cou
     BallFrameJobContext job_ctx = {
         .frame_count = frame_count,
         .angle_period = angle_period,
-        .sphere_texture_size = sphere_texture_size,
+        .sphere_texture_size = geometry.sphere_size,
         .shadow_pixels = shadow_pixels,
         .shadow_w = shadow_w,
         .shadow_h = shadow_h,
@@ -4207,8 +3817,8 @@ static bool freerange_generate_frames(FreedomFrameSet *out_frames, int frame_cou
         .composite_h = g_frame_texture_h,
         .ball_offset_x = g_ball_texture_offset_x,
         .ball_offset_y = g_ball_texture_offset_y,
-        .shadow_offset_x = shadow_offset_x,
-        .shadow_offset_y = shadow_offset_y,
+        .shadow_offset_x = geometry.shadow_offset_x,
+        .shadow_offset_y = geometry.shadow_offset_y,
         .frame_buffer = frame_buffer,
         .frame_size = frame_size
     };
@@ -4273,48 +3883,10 @@ static bool freerange_prepare_blank_frames(FreedomFrameSet *out_frames, int fram
         return false;
     }
 
-    compute_axis_vectors();
-
-    const int sphere_texture_size = BALL_W;
-    const float canonical_total_prop = 1.0f;
-    const float canonical_ball_diameter = 124.0f * canonical_total_prop;
-    const float canonical_ball_radius = canonical_ball_diameter * 0.5f;
-    const float shadow_offset_x_screen = canonical_total_prop * 8.0f * 0.6f;
-    const float shadow_offset_y_screen = canonical_total_prop * 8.0f * 1.0f;
-    const float shadow_size_screen = canonical_ball_diameter * 1.1f + 20.0f * canonical_total_prop;
-
-    const float scale_to_texture = sphere_texture_size / canonical_ball_diameter;
-    float desired_shadow_width_pixels = shadow_size_screen * scale_to_texture;
-    int desired_shadow_size = (int)ceilf(desired_shadow_width_pixels);
-
-    if (!ensure_sphere_pixel_cache(sphere_texture_size)) {
-        fprintf(stderr, "Failed to build sphere pixel cache\n");
+    FreerangeFrameGeometry geometry;
+    if (!freerange_prepare_frame_geometry(&geometry)) {
         return false;
     }
-
-    int shadow_w = 0, shadow_h = 0;
-    uint8_t *shadow_pixels = generate_shadow_pixels(desired_shadow_size, &shadow_w, &shadow_h);
-    if (!shadow_pixels) {
-        fprintf(stderr, "Failed to generate shadow texture\n");
-        return false;
-    }
-
-    const float shadow_x_screen = (canonical_ball_radius + shadow_offset_x_screen) - shadow_size_screen * 0.5f;
-    const float shadow_y_screen = (canonical_ball_radius + shadow_offset_y_screen) - shadow_size_screen * 0.5f;
-    const float shadow_x_tex = shadow_x_screen * scale_to_texture;
-    const float shadow_y_tex = shadow_y_screen * scale_to_texture;
-
-    const float min_x = fminf(0.0f, shadow_x_tex);
-    const float min_y = fminf(0.0f, shadow_y_tex);
-    const float max_x = fmaxf((float)sphere_texture_size, shadow_x_tex + shadow_w);
-    const float max_y = fmaxf((float)sphere_texture_size, shadow_y_tex + shadow_h);
-
-    g_frame_texture_w = (int)ceilf(max_x - min_x);
-    g_frame_texture_h = (int)ceilf(max_y - min_y);
-    g_ball_texture_offset_x = (int)lroundf(-min_x);
-    g_ball_texture_offset_y = (int)lroundf(-min_y);
-
-    free(shadow_pixels);
 
     size_t frame_size = (size_t)g_frame_texture_w * (size_t)g_frame_texture_h * 4;
     size_t total_frame_bytes = frame_size * (size_t)frame_count;
@@ -4656,7 +4228,6 @@ static void freerange_pointer_button(void *data, struct wl_pointer *pointer,
 	                               st->ball_x, st->ball_y,
 	                               st->width, st->height)) {
 	            st->ball_grabbed = true;
-	            interaction_begin_ball_drag(st->pointer_x, st->pointer_y);
 	            if (st->ball_diameter > 0.0f) {
 	                float ball_y_pixels = st->ball_y * (float)st->height;
 	                st->grab_u = ((float)st->pointer_x - st->ball_x) / st->ball_diameter;
@@ -4675,7 +4246,6 @@ static void freerange_pointer_button(void *data, struct wl_pointer *pointer,
 
         if (st->ball_grabbed) {
             st->ball_grabbed = false;
-            interaction_end_ball_drag();
 
             float slingshot_threshold_x = 20.0f;
             float slingshot_threshold_y = 20.0f / (float)st->height;
@@ -5031,16 +4601,12 @@ static int run_freerange_wayland(bool start_muted) {
     g_suppress_hud = false;
     g_freerange_ball_scale = clamp_freerange_ball_scale(g_freerange_ball_scale);
 
-#if defined(__unix__)
     g_floor_y_normalized = 1.0f;
     g_target_peak_y = 0.0f;
-#endif
 
-#if defined(__unix__)
     g_freerange_quit_requested = 0;
     signal(SIGINT, freerange_signal_handler);
     signal(SIGTERM, freerange_signal_handler);
-#endif
 
     static bool seeded = false;
     if (!seeded) {
@@ -5397,7 +4963,7 @@ static int run_freerange_wayland(bool start_muted) {
                                    st.ball_x, st.ball_y,
                                    st.ball_vx, st.ball_vy,
                                    st.ball_vx_direction,
-                                   st.width, st.height,
+                                   st.width,
                                    0.0f, 0.0f,
                                    st.ball_diameter, st.ball_diameter_norm,
                                    1.0f / frames_per_second);
@@ -5444,7 +5010,7 @@ static int run_freerange_wayland(bool start_muted) {
 
     FILE    *fcb_log      = NULL;
     uint64_t fcb_prev_del = 0;                          
-    uint64_t pump_enter_ns = 0;                         
+    uint64_t pump_enter_ns;
     int      fcbi_n       = 0;                          
     double   fcbi_mean    = 0.0, fcbi_M2 = 0.0, fcbi_max = 0.0;
     int      pw_n         = 0;                          
@@ -5455,7 +5021,7 @@ static int run_freerange_wayland(bool start_muted) {
     double   cs_mean      = 0.0, cs_M2  = 0.0;
     uint64_t   fcb_report_at = poingo_perf_counter();
 
-    uint64_t  tick_start         = 0;
+    uint64_t  tick_start;
     double  prev_non_upload_ms  = 0.0;
     double  regen_ms_per_unit   = 0.0;
     bool    prev_regen_active   = false;
@@ -5515,12 +5081,10 @@ static int run_freerange_wayland(bool start_muted) {
         }
         freerange_pump_events(st.display, 20);
         tick_start = poingo_perf_counter();
-#if defined(__unix__)
         if (g_freerange_quit_requested) {
             st.running = false;
             break;
         }
-#endif
 
         uint64_t current_counter = poingo_perf_counter();
         double delta_seconds = (double)(current_counter - st.last_counter) /
@@ -5533,7 +5097,7 @@ static int run_freerange_wayland(bool start_muted) {
             delta_seconds = 0.25;
         }
 
-        double sim_delta = delta_seconds;
+        double sim_delta;
         double delta_diff = delta_seconds - TARGET_FRAME_SECONDS;
         if (fabs(delta_diff) < SNAP_THRESHOLD) {
             sim_delta = TARGET_FRAME_SECONDS;
@@ -5586,7 +5150,6 @@ static int run_freerange_wayland(bool start_muted) {
             }
         }
 
-#if defined(__unix__)
         if (g_freerange_quit_requested) {
             st.running = false;
         }
@@ -5598,7 +5161,6 @@ static int run_freerange_wayland(bool start_muted) {
         float frame_elapsed = (float)delta_seconds;
         update_volume_hud(frame_elapsed);
         update_speed_hud(frame_elapsed);
-#endif
         int vol_up_count = process_key_repeat(&g_vol_up_key, st.key_vol_up_pressed, frame_elapsed);
         int vol_down_count = process_key_repeat(&g_vol_down_key, st.key_vol_down_pressed, frame_elapsed);
         int speed_up_count = process_key_repeat(&g_speed_up_key, st.key_speed_up_pressed, frame_elapsed);
@@ -5657,23 +5219,23 @@ static int run_freerange_wayland(bool start_muted) {
             update_ball_physics(&st.ball_x, &st.ball_y,
                                 &st.ball_vx, &st.ball_vy,
                                 &st.ball_vx_direction,
-                                st.width, st.height,
+                                st.width,
                                 0.0f, 0.0f,
                                 st.ball_diameter, st.ball_diameter_norm,
                                 sim_delta,
-                                st.ball_grabbed, st.make_noise && !g_predictive_audio_enabled,
+                                st.ball_grabbed, false,
                                 NULL, NULL, 0, 0.0f);
         }
 
         g_audio_sim_time += (float)sim_delta;
-        if (g_predictive_audio_enabled && !st.ball_grabbed && !st.ball_cleared) {
+        if (!st.ball_grabbed && !st.ball_cleared) {
             uint64_t apb_t0 = poingo_perf_counter();
             build_audio_predict_buffer(&g_audio_predict,
                                        g_audio_sim_time,
                                        st.ball_x, st.ball_y,
                                        st.ball_vx, st.ball_vy,
                                        st.ball_vx_direction,
-                                       st.width, st.height,
+                                       st.width,
                                        0.0f, 0.0f,
                                        st.ball_diameter, st.ball_diameter_norm,
                                        (float)sim_delta);
@@ -6265,7 +5827,7 @@ int main(int argc, char *argv[]) {
             printf("  --light-color <color> Set the light ball color (format: R,G,B or #RRGGBB)\n");
             printf("  --dark-color <color>  Set the dark ball color (format: R,G,B or #RRGGBB)\n");
             printf("  --start-size <scale>  Set initial ball size (0.25 to 2.0)\n");
-            printf("  --debug               Print FPS to stderr and show FPS HUD\n");
+            printf("  --debug               Write performance diagnostics\n");
             printf("  --help, -h            Show this help message\n");
             return 0;
         } else if (strcmp(argv[i], "--mute") == 0 || strcmp(argv[i], "-mute") == 0 || strcmp(argv[i], "mute") == 0) {
@@ -6298,10 +5860,6 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--debug") == 0) {
             g_debug_mode = true;
         }
-    }
-
-    if (getenv("POINGO_FREEDOM_TRACE") != NULL) {
-        g_freerange_trace = true;
     }
 
     const char *wayland_display_env = getenv("WAYLAND_DISPLAY");

@@ -20,8 +20,7 @@ PKG_CONFIG ?= pkg-config
 
 include $(DESKTOP_TOYS_DIR)/install.mk
 
-# Poingo is a pure-Wayland client: Wayland + EGL/GLES for the native overlay
-# and its own GLES renderer, xkbcommon for the keymap. No SDL, no toolkit.
+# Poingo uses Wayland, EGL/GLES, and xkbcommon.
 WAYLAND_CFLAGS := $(shell $(PKG_CONFIG) --cflags wayland-client wayland-egl egl glesv2 xkbcommon 2>/dev/null)
 WAYLAND_LIBS := $(shell $(PKG_CONFIG) --libs wayland-client wayland-egl egl glesv2 xkbcommon 2>/dev/null)
 ifeq ($(strip $(WAYLAND_LIBS)),)
@@ -29,8 +28,6 @@ WAYLAND_LIBS := -lwayland-client -lwayland-egl -lEGL -lGLESv2 -lxkbcommon
 endif
 
 # cubeb drives the audio device; the shared mixer/DSP lives in libtoyaudio.
-# Prefer pkg-config, then a local sysroot's headers + lib (some distros ship
-# no .pc file); without either the toy still builds but runs silent.
 CUBEB_PKGCONFIG := $(CURDIR)/third_party/cubeb/install/lib64/pkgconfig
 ifneq ($(wildcard $(CUBEB_PKGCONFIG)/libcubeb.pc),)
 export PKG_CONFIG_PATH := $(CUBEB_PKGCONFIG):$(PKG_CONFIG_PATH)
@@ -48,14 +45,11 @@ CUBEB_LIBS := -L$(CUBEB_PREFIX)/lib64 -lcubeb
 endif
 endif
 endif
-AUDIO_CFLAGS :=
-AUDIO_LIBS :=
-ifneq ($(strip $(CUBEB_LIBS)),)
-AUDIO_CFLAGS := -DHAVE_CUBEB $(CUBEB_CFLAGS)
-AUDIO_LIBS := $(CUBEB_LIBS) -lstdc++ -ldl
-else
-$(warning cubeb not found; building without audio)
+ifeq ($(strip $(CUBEB_LIBS)),)
+$(error cubeb is required to build poingo)
 endif
+AUDIO_CFLAGS := $(CUBEB_CFLAGS)
+AUDIO_LIBS := $(CUBEB_LIBS) -lstdc++ -ldl
 
 CFLAGS := -std=c11 -Wall -Wextra -Wshadow -pedantic -D_GNU_SOURCE -D_DEFAULT_SOURCE -O2 -fPIC \
           -I$(CURDIR) -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(AUDIO_CFLAGS)
