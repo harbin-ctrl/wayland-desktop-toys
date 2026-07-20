@@ -874,9 +874,9 @@ static void update_bounce_sound_style_for_mode(void) {
     mark_sounds_dirty(fmaxf(size_scale, 0.01f));
 }
 
-static AudioPredictBuffer g_audio_predict = {0};
+static AudioPredictBuffer g_audio_predict __attribute__((unused)) = {0};
 static AudioPredictQueueEntry g_audio_predict_queue[AUDIO_PREDICT_QUEUE_MAX] = {0};
-static float g_audio_sim_time = 0.0f;
+static float g_audio_sim_time __attribute__((unused)) = 0.0f;
 static float g_audio_predict_delay_seconds = AUDIO_PREDICT_DELAY_SECONDS;
 static float g_audio_predict_step_seconds = 1.0f / (float)FPS;
 enum {
@@ -1666,7 +1666,7 @@ static void probe_cubeb_handle_restart(void) {
     probe_cubeb_start();
 }
 
-static void probe_cubeb_update(void) {
+static void __attribute__((unused)) probe_cubeb_update(void) {
     probe_cubeb_handle_restart();
     if (!g_cubeb_probe.active) {
         return;
@@ -1875,7 +1875,7 @@ static void record_recent_bounce_playback(const BounceEvent *ev) {
     }
 }
 
-static void audio_predict_reset(float now_time) {
+static void __attribute__((unused)) audio_predict_reset(float now_time) {
     (void)now_time;
     clear_audio_predict_queue();
     for (int i = 0; i < RECENT_BOUNCE_PLAYBACK_COUNT; ++i) {
@@ -1911,7 +1911,7 @@ static float get_audio_predict_horizon_seconds(void) {
 }
 
 
-static void build_audio_predict_buffer(AudioPredictBuffer *buffer,
+static void __attribute__((unused)) build_audio_predict_buffer(AudioPredictBuffer *buffer,
                                        float base_time,
                                        float ball_x, float ball_y,
                                        float ball_vx, float ball_vy,
@@ -2017,7 +2017,7 @@ static void trigger_predictive_audio_with_timing(const AudioPredictBuffer *buffe
     }
 }
 
-static void trigger_predictive_audio(const AudioPredictBuffer *buffer, float now_time, bool make_noise) {
+static void __attribute__((unused)) trigger_predictive_audio(const AudioPredictBuffer *buffer, float now_time, bool make_noise) {
     trigger_predictive_audio_with_timing(buffer, now_time, make_noise, NULL, NULL);
 }
 
@@ -4728,7 +4728,6 @@ static int run_freerange_wayland(bool start_muted) {
         wl_display_disconnect(st.display);
         return 1;
     }
-    probe_cubeb_start();
 
     FreedomFrameSet frames = {0};
     bool use_blank_frames = freerange_prepare_blank_frames(&frames, frame_count);
@@ -4986,17 +4985,6 @@ static int run_freerange_wayland(bool start_muted) {
         float scaled_prop = total_prop * g_freerange_ball_scale;
         st.ball_diameter = 124.0f * scaled_prop;
         st.ball_diameter_norm = st.ball_diameter / (float)st.height;
-        g_audio_sim_time = 0.0f;
-        audio_predict_reset(g_audio_sim_time);
-        build_audio_predict_buffer(&g_audio_predict,
-                                   g_audio_sim_time,
-                                   st.ball_x, st.ball_y,
-                                   st.ball_vx, st.ball_vy,
-                                   st.ball_vx_direction,
-                                   st.width,
-                                   0.0f, 0.0f,
-                                   st.ball_diameter, st.ball_diameter_norm,
-                                   1.0f / frames_per_second);
     }
 
     st.performance_frequency = poingo_perf_freq();
@@ -5102,7 +5090,6 @@ static int run_freerange_wayland(bool start_muted) {
     }
 
     while (st.running) {
-        bool was_ball_grabbed = st.ball_grabbed;
         bool miss_this_frame  = false;
         {
             struct timespec _pe;
@@ -5187,7 +5174,6 @@ static int run_freerange_wayland(bool start_muted) {
             break;
         }
 
-        probe_cubeb_update();
         float frame_elapsed = (float)delta_seconds;
         update_volume_hud(frame_elapsed);
         update_speed_hud(frame_elapsed);
@@ -5210,10 +5196,6 @@ static int run_freerange_wayland(bool start_muted) {
         }
 
         bool hud_visible = freerange_gl_update_hud(&st);
-
-        if (was_ball_grabbed && !st.ball_grabbed) {
-            audio_predict_reset(g_audio_sim_time);
-        }
 
         if (st.resize_pending) {
             wl_egl_window_resize(st.egl_window, st.width, st.height, 0, 0);
@@ -5253,27 +5235,8 @@ static int run_freerange_wayland(bool start_muted) {
                                 0.0f, 0.0f,
                                 st.ball_diameter, st.ball_diameter_norm,
                                 sim_delta,
-                                st.ball_grabbed, false,
+                                st.ball_grabbed, st.make_noise,
                                 NULL, NULL, 0, 0.0f);
-        }
-
-        g_audio_sim_time += (float)sim_delta;
-        if (!st.ball_grabbed && !st.ball_cleared) {
-            uint64_t apb_t0 = poingo_perf_counter();
-            build_audio_predict_buffer(&g_audio_predict,
-                                       g_audio_sim_time,
-                                       st.ball_x, st.ball_y,
-                                       st.ball_vx, st.ball_vy,
-                                       st.ball_vx_direction,
-                                       st.width,
-                                       0.0f, 0.0f,
-                                       st.ball_diameter, st.ball_diameter_norm,
-                                       (float)sim_delta);
-            double apb_ms = get_perf_seconds(apb_t0, poingo_perf_counter()) * 1000.0;
-            apb_ms_sum += apb_ms;
-            apb_count++;
-            if (apb_ms > apb_ms_max) apb_ms_max = apb_ms;
-            trigger_predictive_audio(&g_audio_predict, g_audio_sim_time, st.make_noise);
         }
 
         if (st.shutdown_pending) {
