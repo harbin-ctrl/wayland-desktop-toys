@@ -1,8 +1,6 @@
 # Wayland Desktop Toys
 
-The interactive desktop toys, native Wayland on Raspberry Pi OS. Each is its
-own git repo; this directory just gathers them and fans out `make` targets.
-(The non-interactive screensavers live in `~/wayland-screensavers`.)
+Three interactive desktop toys for Wayland.  Coded, tested, and optimized on a Raspberry Pi 400, but they will run on any modern Linux system.
 
 ## Included Toys
 
