@@ -3,6 +3,7 @@
 #define RINGMENU_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define RINGMENU_MAX_ITEMS 16
@@ -60,6 +61,9 @@ void ringmenu_draw(RingMenu *m, uint32_t *dst, int dst_w, int dst_h, int dst_x, 
 #define RINGMENU_FIELD_WIDTH 160.0f  // radial thickness of the field
 
 uint32_t *ringmenu_color_drop(uint8_t r, uint8_t g, uint8_t b,
+                              int slot, int count, int size);
+bool ringmenu_color_drop_into(uint32_t *px_buf, size_t capacity,
+                              uint8_t r, uint8_t g, uint8_t b,
                               int slot, int count, int size);
 
 float ringmenu_field_radius(const RingMenu *m);

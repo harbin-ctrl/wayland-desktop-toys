@@ -702,6 +702,20 @@ uint32_t *ringmenu_color_drop(uint8_t r, uint8_t g, uint8_t b,
     if (count < 1 || size < 1) return NULL;
     uint32_t *px_buf = calloc((size_t)size * size, 4);
     if (!px_buf) return NULL;
+    if (!ringmenu_color_drop_into(px_buf, (size_t)size * size,
+                                  r, g, b, slot, count, size)) {
+        free(px_buf);
+        return NULL;
+    }
+    return px_buf;
+}
+
+bool ringmenu_color_drop_into(uint32_t *px_buf, size_t capacity,
+                              uint8_t r, uint8_t g, uint8_t b,
+                              int slot, int count, int size) {
+    if (!px_buf || count < 1 || size < 1 || slot < 0 || slot >= count ||
+        capacity < (size_t)size * size) return false;
+    memset(px_buf, 0, (size_t)size * size * sizeof(*px_buf));
     float ctr = size / 2.0f;
 
     // The drop's tail points back at the menu center.
@@ -734,7 +748,7 @@ uint32_t *ringmenu_color_drop(uint8_t r, uint8_t g, uint8_t b,
                 ((uint32_t)(alpha * 255.0f + 0.5f) << 24);
         }
     }
-    return px_buf;
+    return true;
 }
 
 float ringmenu_field_radius(const RingMenu *m) {

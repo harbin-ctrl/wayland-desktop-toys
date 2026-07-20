@@ -111,6 +111,7 @@ typedef enum {
 #define SPLAT_S_MIN 45.0
 #define SPLAT_S_MAX 260.0
 #define SPLAT_DRAG_SPACING 55.0
+#define MENU_DISC_SIZE 36
 #define SPLAT_SIZE_ALLOC_MAX (2.0 * SPLAT_S_MAX)
 #define SPLAT_SCRATCH_SIDE ((int)(2.0 * SPLAT_SIZE_ALLOC_MAX) + 64)
 #define SPLAT_SCRATCH_CAP ((size_t)SPLAT_SCRATCH_SIDE * SPLAT_SCRATCH_SIDE)
@@ -220,6 +221,7 @@ typedef struct {
     int palette_index;
     
     PaintColor palette[PALETTE_SIZE];
+    uint32_t color_discs[PALETTE_SIZE][MENU_DISC_SIZE * MENU_DISC_SIZE];
     int color_picker_slot;
     PaintColor original_color;
     bool color_picker_locked;
@@ -1879,20 +1881,19 @@ static void set_paint_mode(PaintState *st, bool on) {
 
 
 
-#define MENU_DISC_SIZE 36
-
-static uint32_t *make_color_disc(PaintColor c, int slot) {
-    return ringmenu_color_drop(c.r, c.g, c.b, slot, MENU_ITEMS, MENU_DISC_SIZE);
+static bool make_color_disc(PaintState *st, PaintColor c, int slot) {
+    return ringmenu_color_drop_into(st->color_discs[slot],
+                                    (size_t)MENU_DISC_SIZE * MENU_DISC_SIZE,
+                                    c.r, c.g, c.b, slot, MENU_ITEMS,
+                                    MENU_DISC_SIZE);
 }
 
 static bool create_color_menu(PaintState *st) {
     RingMenuItem items[MENU_ITEMS] = {0};
-    uint32_t *discs[PALETTE_SIZE] = {0};
     bool ok = true;
     for (size_t i = 0; i < PALETTE_SIZE; i++) {
-        discs[i] = make_color_disc(st->palette[i], i);
-        if (!discs[i]) ok = false;
-        items[i].image = discs[i];
+        if (!make_color_disc(st, st->palette[i], (int)i)) ok = false;
+        items[i].image = st->color_discs[i];
         items[i].image_w = MENU_DISC_SIZE;
         items[i].image_h = MENU_DISC_SIZE;
     }
@@ -1907,7 +1908,6 @@ static bool create_color_menu(PaintState *st) {
     items[MENU_RESULT_CLEAR - 1].label = "CLEAR";
     items[MENU_RESULT_QUIT - 1].label = "QUIT";
     if (ok) st->menu = ringmenu_create(items, MENU_ITEMS);
-    for (size_t i = 0; i < PALETTE_SIZE; i++) free(discs[i]);
     return st->menu != NULL;
 }
 
@@ -2358,9 +2358,9 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time,
                        (int)ceilf(mx + arc_r), (int)ceilf(my + arc_r));
             if (st->color_picker_slot >= 0) {
                 st->palette[st->color_picker_slot] = st->original_color;
-                uint32_t *disc = make_color_disc(st->original_color, st->color_picker_slot);
-                ringmenu_update_image(st->menu, st->color_picker_slot, disc);
-                free(disc);
+                make_color_disc(st, st->original_color, st->color_picker_slot);
+                ringmenu_update_image(st->menu, st->color_picker_slot,
+                                      st->color_discs[st->color_picker_slot]);
             }
             st->color_picker_slot = slot;
             if (slot >= 0) {
@@ -2377,9 +2377,8 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time,
                                      st->pointer_y, &new_color.r,
                                      &new_color.g, &new_color.b)) {
                 st->palette[slot] = new_color;
-                uint32_t *disc = make_color_disc(new_color, slot);
-                ringmenu_update_image(st->menu, slot, disc);
-                free(disc);
+                make_color_disc(st, new_color, slot);
+                ringmenu_update_image(st->menu, slot, st->color_discs[slot]);
 
                 if (!st->paint_mode) build_badge(st);
                 st->cursor_dirty = true;
