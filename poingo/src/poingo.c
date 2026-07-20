@@ -374,11 +374,18 @@ typedef struct {
 
 static SpherePixelCache *sphere_cache = NULL;
 static int sphere_cache_size = 0;
+static int sphere_cache_capacity_size = 0;
 
 static void invalidate_sphere_pixel_cache(void) {
+    /* Keep the storage; color/mode changes only require recomputation. */
+    sphere_cache_size = 0;
+}
+
+static void release_sphere_pixel_cache(void) {
     free(sphere_cache);
     sphere_cache = NULL;
     sphere_cache_size = 0;
+    sphere_cache_capacity_size = 0;
 }
 
 static inline void compute_axis_vectors(void) {
@@ -509,16 +516,17 @@ static bool ensure_sphere_pixel_cache(int size) {
         return true;
     }
 
-    if (sphere_cache) {
-        free(sphere_cache);
-        sphere_cache = NULL;
-        sphere_cache_size = 0;
+    if (sphere_cache && sphere_cache_capacity_size != size) {
+        /* A different cache size would require a runtime allocation. All
+         * callers use the startup-selected ball texture size. */
+        return false;
     }
 
     size_t total_pixels = (size_t)size * (size_t)size;
-    SpherePixelCache *cache = (SpherePixelCache *)calloc(total_pixels, sizeof(SpherePixelCache));
+    SpherePixelCache *cache = sphere_cache;
     if (!cache) {
-        return false;
+        cache = (SpherePixelCache *)calloc(total_pixels, sizeof(SpherePixelCache));
+        if (!cache) return false;
     }
 
     float light_x = -0.3f;
@@ -602,6 +610,7 @@ static bool ensure_sphere_pixel_cache(int size) {
 
     sphere_cache = cache;
     sphere_cache_size = size;
+    sphere_cache_capacity_size = size;
     return true;
 }
 
@@ -6240,6 +6249,7 @@ static int run_freerange_wayland(bool start_muted) {
     free(st.regen_unit_done_storage);
     free(st.regen_order_storage);
     free(st.regen_thread_storage);
+    release_sphere_pixel_cache();
     return 0;
 }
 
