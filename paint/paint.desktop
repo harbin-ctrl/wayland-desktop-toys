@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Paint
+Comment=Splat and spray paint on the screen
+Exec=paint
+Icon=paint
+Terminal=false
+Type=Application
+Categories=DesktopToy;

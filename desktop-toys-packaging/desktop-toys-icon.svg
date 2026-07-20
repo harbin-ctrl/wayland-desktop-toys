@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Left ear — small gap from head -->
+  <rect x="20" y="88" width="24" height="52" rx="9" fill="#4CAF50"/>
+  <!-- Right ear -->
+  <rect x="212" y="88" width="24" height="52" rx="9" fill="#4CAF50"/>
+
+  <!-- Head -->
+  <rect x="48" y="62" width="160" height="148" rx="24" fill="#1D3557"/>
+
+  <!-- Antenna stem -->
+  <rect x="125" y="28" width="6" height="38" rx="3" fill="#1D3557"/>
+  <!-- Antenna ball — same size as eyes -->
+  <circle cx="128" cy="22" r="22" fill="#4CAF50"/>
+
+  <!-- Eyes -->
+  <circle cx="94"  cy="118" r="22" fill="#4CAF50"/>
+  <circle cx="162" cy="118" r="22" fill="#4CAF50"/>
+
+  <!-- Mouth bar -->
+  <rect x="76" y="160" width="104" height="24" rx="12" fill="#4CAF50"/>
+</svg>
