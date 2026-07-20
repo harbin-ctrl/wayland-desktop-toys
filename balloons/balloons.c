@@ -9,6 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <signal.h>
+#include <pthread.h>
 #include <malloc.h>
 #include <sys/mman.h>
 
@@ -45,6 +46,30 @@ static void startup_mark(const char *phase) {
         fprintf(stderr, "[balloons startup] %-24s %8.1f ms\n",
                 phase, startup_elapsed_ms());
     }
+}
+
+typedef struct {
+    Anim *anims;
+    Anim string_anim;
+    Anim *pop_anims;
+    int anim_count;
+    int pop_count;
+    bool assets_ok;
+    bool audio_ok;
+} StartupJobs;
+
+static void *startup_assets_worker(void *userdata) {
+    StartupJobs *jobs = userdata;
+    jobs->assets_ok = balloon_generate_assets(&jobs->anims, &jobs->anim_count,
+                                              &jobs->string_anim,
+                                              &jobs->pop_anims, &jobs->pop_count);
+    return NULL;
+}
+
+static void *startup_audio_worker(void *userdata) {
+    StartupJobs *jobs = userdata;
+    jobs->audio_ok = audio_init();
+    return NULL;
 }
 
 
@@ -1496,25 +1521,29 @@ int main(int argc, char **argv) {
     g_trace = getenv("APNGO_TRACE") != NULL;
     g_storm_countdown = roll_storm_countdown();
 
-    audio_init();
-    startup_mark("audio initialized");
-    mark_sounds_dirty(BALLOON_SOUND_SCALE); 
-    audio_pregen_async();                   
+    StartupJobs startup_jobs = {0};
+    pthread_t audio_thread, assets_thread;
+    bool audio_thread_started =
+        pthread_create(&audio_thread, NULL, startup_audio_worker, &startup_jobs) == 0;
+    bool assets_thread_started =
+        pthread_create(&assets_thread, NULL, startup_assets_worker, &startup_jobs) == 0;
 
+    if (!audio_thread_started) startup_jobs.audio_ok = audio_init();
+    if (!assets_thread_started) {
+        startup_jobs.assets_ok = balloon_generate_assets(
+            &startup_jobs.anims, &startup_jobs.anim_count,
+            &startup_jobs.string_anim, &startup_jobs.pop_anims,
+            &startup_jobs.pop_count);
+    }
+    startup_mark("startup jobs launched");
+
+    /* While those jobs run, continue with the independent Wayland/EGL setup
+     * below. They are joined before any generated pixels are uploaded. */
     Anim *anims = NULL;
-    if (!balloon_generate_assets(&anims, &nfiles, &g_str_anim,
-                                 &g_pop_anims, &g_npop_anims)) {
+    if (!startup_jobs.assets_ok && !assets_thread_started) {
         fprintf(stderr, "balloons: failed to generate runtime assets\n");
         return 1;
     }
-    startup_mark("procedural assets");
-    if (!find_alpha_bounds(&anims[0], &g_ghost_balloon_bounds)) {
-        fprintf(stderr, "balloons: unable to measure ghost icon source\n");
-        return 1;
-    }
-
-    g_raspberry = load_raspberry_from_pi();
-    startup_mark("external assets");
 
     Ctx ctx = {0};
     g_ctx = &ctx;
@@ -1540,6 +1569,32 @@ int main(int argc, char **argv) {
     }
     xdg_wm_base_add_listener(ctx.wm_base, &wm_base_listener, &ctx);
     if (ctx.seat) wl_seat_add_listener(ctx.seat, &seat_listener, &ctx);
+
+    if (audio_thread_started) pthread_join(audio_thread, NULL);
+    if (assets_thread_started) pthread_join(assets_thread, NULL);
+    if (!startup_jobs.audio_ok) {
+        fprintf(stderr, "balloons: audio initialization failed; continuing silently\n");
+    }
+    if (!startup_jobs.assets_ok) {
+        fprintf(stderr, "balloons: failed to generate runtime assets\n");
+        return 1;
+    }
+    anims = startup_jobs.anims;
+    nfiles = startup_jobs.anim_count;
+    g_str_anim = startup_jobs.string_anim;
+    g_pop_anims = startup_jobs.pop_anims;
+    g_npop_anims = startup_jobs.pop_count;
+    startup_mark("audio and assets ready");
+    mark_sounds_dirty(BALLOON_SOUND_SCALE);
+    audio_pregen_async();
+
+    if (!find_alpha_bounds(&anims[0], &g_ghost_balloon_bounds)) {
+        fprintf(stderr, "balloons: unable to measure ghost icon source\n");
+        return 1;
+    }
+
+    g_raspberry = load_raspberry_from_pi();
+    startup_mark("external assets");
 
     ctx.surface = wl_compositor_create_surface(ctx.compositor);
     wl_surface_set_opaque_region(ctx.surface, NULL);
