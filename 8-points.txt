@@ -1,0 +1,36 @@
+Wayland Desktop Toys — improvement list
+
+1. Keep the Paint offscreen test healthy. [DONE]
+   The test target must include every shared header and library it needs.
+
+2. Add automated CI.
+   At minimum: GCC and Clang builds, AddressSanitizer/UndefinedBehaviorSanitizer,
+   Paint offscreen tests, deterministic thunder/asset hash tests, and a headless
+   Weston compositor smoke test.
+
+3. Centralize the Wayland overlay lifecycle.
+   Share surface creation, EGL setup, input-region updates, compositor-close
+   handling, and graceful shutdown so the toys cannot drift behaviorally.
+
+4. Define and improve portability boundaries.
+   Audit Linux/glibc assumptions such as memfd_create, malloc_trim,
+   linux/input-event-codes.h, _GNU_SOURCE, and backend-specific audio behavior.
+   Either add guarded fallbacks or explicitly document the supported target.
+
+5. Keep dependency handling consistent and non-invasive. [IN PROGRESS]
+   Use one project-wide dependency checklist and read-only checks. Do not have
+   build scripts install packages or mutate the host. Cubeb is now the sole
+   external audio backend.
+
+6. Split Poingo into maintainable modules.
+   Separate the renderer, physics, audio scheduling, Wayland lifecycle, menus,
+   and shutdown state machine from the current large translation unit.
+
+7. Add a seed/debug mode.
+   A command-line seed would make visual and audio behavior reproducible when
+   investigating runtime-randomness bugs.
+
+8. Make shared packaging safer. [DONE]
+   Uninstalling one toy should not remove the shared Desktop Toys menu/category
+   files while other toys are still installed. Use ownership tracking or a
+   separate shared package.

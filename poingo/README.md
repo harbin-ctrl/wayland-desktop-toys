@@ -27,10 +27,8 @@ make          # builds ./bin/poingo
 
 Development packages: `wayland-client`, `wayland-egl`, `egl`, `glesv2`,
 `xkbcommon`, and `cubeb` (audio; without it the toy builds and runs silent).
-`./getdeps.sh` installs them on apt/dnf distros, and on immutable OSTree-based
-systems (Bazzite, Silverblue, Kinoite) extracts the devel RPMs into
-`third_party/sysroot/` with no root access or container. `./build.sh` runs the
-dependency check and the build together.
+`./build.sh` checks the dependencies and builds Poingo without modifying the
+host. The project-wide package checklist is in `../list.todo`.
 
 ## Options
 ```

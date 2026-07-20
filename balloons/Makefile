@@ -1,68 +1,5 @@
 .DEFAULT_GOAL := all
 
-# Check if required libraries exist on the host/container
-HAS_LIBS := $(shell pkg-config --exists wayland-client wayland-egl egl glesv2 2>/dev/null && echo yes || echo no)
-
-.PHONY: distrobox
-distrobox:
-	@echo "=== Setting up Distrobox Build Environment ==="
-	@if ! command -v distrobox >/dev/null 2>&1; then \
-		echo "Distrobox not found. Installing distrobox..."; \
-		if command -v curl >/dev/null 2>&1; then \
-			curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/install | sudo sh; \
-		else \
-			echo "curl is required to install distrobox. Please install curl and try again."; \
-			exit 1; \
-		fi; \
-	else \
-		echo "Distrobox is already installed."; \
-	fi
-	@if ! command -v podman >/dev/null 2>&1 && ! command -v docker >/dev/null 2>&1; then \
-		echo "Neither podman nor docker found. Attempting to install podman..."; \
-		if command -v apt-get >/dev/null 2>&1; then \
-			sudo apt-get update && sudo apt-get install -y podman; \
-		elif command -v dnf >/dev/null 2>&1; then \
-			sudo dnf install -y podman; \
-		elif command -v pacman >/dev/null 2>&1; then \
-			sudo pacman -S --noconfirm podman; \
-		else \
-			echo "Please install podman or docker manually and try again."; \
-			exit 1; \
-		fi; \
-	fi
-	@if ! distrobox list 2>/dev/null | grep -q 'dev'; then \
-		echo "Creating 'dev' distrobox container..."; \
-		distrobox create --image quay.io/fedora/fedora:40 --name dev --yes; \
-	else \
-		echo "Distrobox container 'dev' already exists."; \
-	fi
-	@echo "Installing build dependencies inside the 'dev' container..."
-	@distrobox-enter -n dev -- sudo dnf install -y gcc make pkgconf-pkg-config wayland-devel mesa-libEGL-devel mesa-libGLES-devel cubeb-devel
-	@echo "Building the software inside the container..."
-	@distrobox-enter -n dev -- $(MAKE) --no-print-directory all
-	@echo "=== Distrobox Build Environment Setup & Build Complete! ==="
-
-ifeq ($(HAS_LIBS),no)
-# Check if we are already inside a container
-INSIDE_CONTAINER := $(shell [ -f /run/.containerenv ] && echo yes || echo no)
-ifeq ($(INSIDE_CONTAINER),no)
-# See if distrobox and the 'dev' container are available
-HAS_DISTROBOX := $(shell command -v distrobox >/dev/null 2>&1 && distrobox list 2>/dev/null | grep -q 'dev' && echo yes || echo no)
-ifeq ($(HAS_DISTROBOX),yes)
-$(info [Host Build] Missing local dev dependencies. Forwarding build to distrobox 'dev' container...)
-%:
-	@distrobox-enter -n dev -- $(MAKE) --no-print-directory $@
-all:
-	@distrobox-enter -n dev -- $(MAKE) --no-print-directory all
-.PHONY: all
-else
-$(error Missing Wayland/EGL/GLESv2 development headers. Please install them, or run 'make distrobox' to automatically install and set up a dev container)
-endif
-else
-$(error Missing Wayland/EGL/GLESv2 development headers inside container.)
-endif
-else
-
 CC     := gcc
 CFLAGS := -O3 -ffast-math -Wall -pthread $(shell pkg-config --cflags wayland-client wayland-egl egl glesv2)
 LIBS   := $(shell pkg-config --libs wayland-client wayland-egl egl glesv2) -lm -pthread
@@ -232,5 +169,3 @@ uninstall-user: desktop-toys-uninstall-user
 	$(RM) "$(HOME)/.icons/desktop-toys.png"
 	update-desktop-database "$(HOME)/.local/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -t -q "$(HOME)/.local/share/icons/hicolor" 2>/dev/null || true
-
-endif

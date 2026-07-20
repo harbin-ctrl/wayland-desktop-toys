@@ -25,7 +25,7 @@ check_deps() {
         DEPS_MISSING=1
     fi
 
-    if [ ! -f "${ROOT_DIR}/third_party/lodepng/lodepng.h" ] || [ ! -f "${ROOT_DIR}/third_party/lodepng/lodepng.c" ]; then
+    if [ ! -f "${ROOT_DIR}/../third_party/lodepng/lodepng.h" ] || [ ! -f "${ROOT_DIR}/../third_party/lodepng/lodepng.c" ]; then
         echo "-> lodepng source files for icon generation are missing."
         DEPS_MISSING=1
     fi
@@ -35,17 +35,11 @@ echo "Checking dependencies..."
 check_deps
 
 if [ "$DEPS_MISSING" -eq 1 ]; then
-    echo "Required dependencies are missing. Automatically invoking getdeps.sh to install them..."
-    "${ROOT_DIR}/getdeps.sh"
-    setup_sysroot_env
-    check_deps
-    if [ "$DEPS_MISSING" -eq 1 ]; then
-        echo "Error: dependencies are still missing after running getdeps.sh." >&2
-        exit 1
-    fi
-else
-    echo "All dependencies (Wayland, EGL/GLES, cubeb) are present."
+    echo "Required dependencies are missing. See ../list.todo for the package checklist." >&2
+    exit 1
 fi
+
+echo "All dependencies (Wayland, EGL/GLES, cubeb) are present."
 
 echo "Building Poingo..."
 make clean

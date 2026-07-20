@@ -27,15 +27,11 @@ The hanging **string is not part of the balloon body** — it is one shared, col
 
 ## Build
 
-On standard desktop Linux, simply run `make`.
-
-On immutable operating systems like Bazzite/Kinoite, if the host lacks development libraries but has a Distrobox container named `dev` set up, running `make` from the host will automatically delegate the compilation to the container. The output binaries will be created in the current directory and can be run natively on the host.
-
-To automatically install Distrobox and Podman (if missing), create the `dev` container, install all compilation dependencies inside it, and build the project, run:
+Install the project-wide development packages listed in `list.todo`, then run
+`make` from the repository root. To install locally afterward, run:
 
 ```bash
-make distrobox
-make install-user   # installs to ~/.local/bin
+make install-user
 ```
 
 ## Usage
