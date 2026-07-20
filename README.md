@@ -7,17 +7,13 @@ own git repo; this directory just gathers them and fans out `make` targets.
 ## Included Toys
 
 1. **Paint** (`paint`): transparent fullscreen paint overlay with two
-   tools on one canvas — SPLAT throws flat glossy enamel blobs, SPRAY mists
-   translucent mixing paint that drips when laid on thick. Supersedes the old
-   spray-wayland and splat-wayland.
+   tools on one canvas — SPLAT throws flat glossy enamel blobs, SPRAY is your own graffiti-ready spraycan!
 2. **Poingo** (`poingo`): a ball bounces around your desktop with
-   procedurally synthesized thunder.
+   a crashing boing sound.  Retro memories!
 3. **Balloons** (`balloons`): colorful balloons drift up the desktop,
-   with occasional breezes that blow them sideways.
+   with occasional breezes.  Sometimes, the storms come. Pop them if you want to!
 
-They share the library checkouts at `$HOME`: `ring-menu` (circular
-menu + color field), `toy-audio` (mixer + bounce synthesizer), and
-`desktop-toys-packaging` (the Desktop Toys menu category and install.mk).
+Right click for the menu.  You can "GHOST" any of them, they will spookily get on with it in the background while you work.  Click on the big icon in the upper right of your screen to play with them again!
 
 ## Build and Installation
 
