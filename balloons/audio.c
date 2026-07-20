@@ -669,6 +669,17 @@ static bool build_thunder_clip(SamplePair *pair, int clip_index) {
     return true;
 }
 
+typedef struct {
+    int index;
+    bool ok;
+} ThunderBuildJob;
+
+static void *build_thunder_clip_worker(void *userdata) {
+    ThunderBuildJob *job = userdata;
+    job->ok = build_thunder_clip(&g_thunder[job->index], job->index);
+    return NULL;
+}
+
 bool audio_init(void) {
     if (audio_device_open) {
         return true;
@@ -727,12 +738,32 @@ bool audio_init(void) {
         }
     }
 
+    pthread_t thunder_threads[THUNDER_CLIP_COUNT];
+    ThunderBuildJob thunder_jobs[THUNDER_CLIP_COUNT];
+    bool thunder_started[THUNDER_CLIP_COUNT] = { false };
     for (int c = 0; c < THUNDER_CLIP_COUNT; ++c) {
-        if (!build_thunder_clip(&g_thunder[c], c)) {
-            fprintf(stderr, "balloons: failed to build thunder clip %d\n", c);
-            audio_shutdown();
-            return false;
+        thunder_jobs[c] = (ThunderBuildJob){ .index = c, .ok = false };
+        if (pthread_create(&thunder_threads[c], NULL,
+                           build_thunder_clip_worker, &thunder_jobs[c]) != 0) {
+            break;
         }
+        thunder_started[c] = true;
+    }
+    bool thunder_ok = true;
+    for (int c = 0; c < THUNDER_CLIP_COUNT; ++c) {
+        if (thunder_started[c]) {
+            pthread_join(thunder_threads[c], NULL);
+        } else {
+            thunder_jobs[c].ok = build_thunder_clip(&g_thunder[c], c);
+        }
+        if (!thunder_jobs[c].ok) {
+            fprintf(stderr, "balloons: failed to build thunder clip %d\n", c);
+            thunder_ok = false;
+        }
+    }
+    if (!thunder_ok) {
+        audio_shutdown();
+        return false;
     }
     if (!toy_mixer_reserve(&g_mixer, THUNDER_CLIP_SECONDS * SAMPLE_RATE) ||
         !toy_audio_reserve_scratch(THUNDER_CLIP_SECONDS * SAMPLE_RATE)) {
