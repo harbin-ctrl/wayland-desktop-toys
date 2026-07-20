@@ -602,6 +602,10 @@ void ringmenu_rect(const RingMenu *m, int *x, int *y, int *w, int *h) {
     if (h) *h = m->size;
 }
 
+int ringmenu_size(const RingMenu *m) {
+    return m ? m->size : 0;
+}
+
 void ringmenu_geometry(const RingMenu *m, int *cx, int *cy, float *r0, float *r1) {
     if (!m) return;
     if (cx) *cx = m->cx;

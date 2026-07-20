@@ -43,6 +43,7 @@ int ringmenu_motion(RingMenu *m, int x, int y);
 int ringmenu_button(RingMenu *m, int button, bool pressed);
 
 void ringmenu_rect(const RingMenu *m, int *x, int *y, int *w, int *h);
+int ringmenu_size(const RingMenu *m);
 
 void ringmenu_geometry(const RingMenu *m, int *cx, int *cy, float *r0, float *r1);
 

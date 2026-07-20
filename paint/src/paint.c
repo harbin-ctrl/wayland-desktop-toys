@@ -197,6 +197,9 @@ typedef struct {
     bool menu_dirty;
 
     uint32_t *badge;
+    uint32_t *badge_base;
+    uint32_t *badge_icon;
+    uint32_t *badge_full;
     bool frame_pending;
 
     bool paint_mode;    
@@ -1765,27 +1768,20 @@ static void badge_pos(const PaintState *st, int *x, int *y) {
 }
 
 static void build_badge(PaintState *st) {
-    if (!st->badge) {
-        st->badge = ghost_icon_create_bg(false);
-        if (!st->badge) return;
-    } else {
-        uint32_t *new_bg = ghost_icon_create_bg(false);
-        if (new_bg) {
-            free(st->badge);
-            st->badge = new_bg;
-        }
-    }
+    if (!st->badge || !st->badge_base || !st->badge_icon || !st->badge_full) return;
+    memcpy(st->badge, st->badge_base, (size_t)BADGE_SIZE * BADGE_SIZE * 4);
     int preview_idx = st->palette_index;
     if (st->color_picker_slot >= 0) preview_idx = st->color_picker_slot;
     const PaintColor pc = st->palette[preview_idx];
     
-    uint32_t *icon = calloc((size_t)BADGE_SIZE * BADGE_SIZE, 4);
-    if (!icon) return;
+    uint32_t *icon = st->badge_icon;
+    memset(icon, 0, (size_t)BADGE_SIZE * BADGE_SIZE * 4);
 
     if (st->tool == TOOL_SPLAT) {
         int full_n = BADGE_SIZE * 2;
-        uint32_t *full = calloc((size_t)full_n * full_n, 4);
-        if (full) {
+        uint32_t *full = st->badge_full;
+        memset(full, 0, (size_t)full_n * full_n * 4);
+        {
             double k = (double)full_n / 120.0;   
             double tip = (double)full_n / 2.0 - 29.0 * k;
             render_brush(full, full_n, full_n, full_n, tip, tip, k, pc);
@@ -1812,7 +1808,6 @@ static void build_badge(PaintState *st) {
                     icon[(size_t)y * BADGE_SIZE + x] = out;
                 }
             }
-            free(full);
         }
     } else {
         const double k = 0.68;       
@@ -1858,7 +1853,6 @@ static void build_badge(PaintState *st) {
             }
         }
     }
-    free(icon);
 }
 
 static void update_input_region(PaintState *st);
@@ -2142,12 +2136,7 @@ static void gl_draw(PaintState *st, bool repaint_full, int rx0, int ry0, int rx1
             int cw = x1 - x0;
             int ch = y1 - y0;
             size_t need = (size_t)cw * ch;
-            if (st->menu_scratch_cap < need) {
-                free(st->menu_scratch);
-                st->menu_scratch = malloc(need * 4);
-                st->menu_scratch_cap = st->menu_scratch ? need : 0;
-            }
-            if (st->menu_scratch) {
+            if (st->menu_scratch && need <= st->menu_scratch_cap) {
                 for (int row = 0; row < ch; row++) {
                     memcpy(st->menu_scratch + (size_t)row * cw,
                            st->canvas + (size_t)(y0 + row) * st->width + x0,
@@ -2172,12 +2161,7 @@ static void gl_draw(PaintState *st, bool repaint_full, int rx0, int ry0, int rx1
         badge_pos(st, &bx, &by);
         if (bx >= 0 && by >= 0 && by + BADGE_SIZE <= st->height) {
             size_t need = (size_t)BADGE_SIZE * BADGE_SIZE;
-            if (st->menu_scratch_cap < need) {
-                free(st->menu_scratch);
-                st->menu_scratch = malloc(need * 4);
-                st->menu_scratch_cap = st->menu_scratch ? need : 0;
-            }
-            if (st->menu_scratch) {
+            if (st->menu_scratch && need <= st->menu_scratch_cap) {
                 for (int row = 0; row < BADGE_SIZE; row++) {
                     uint32_t *dst = st->menu_scratch + (size_t)row * BADGE_SIZE;
                     const uint32_t *cnv =
@@ -2836,6 +2820,30 @@ int main(void) {
                         "right-click will do nothing\n");
     }
 
+    if (st.menu) {
+        float field_r = ringmenu_field_radius(st.menu);
+        int side = ringmenu_size(st.menu) + (int)ceilf(field_r * 2.0f);
+        size_t menu_cap = (size_t)side * side;
+        if (menu_cap < (size_t)BADGE_SIZE * BADGE_SIZE) {
+            menu_cap = (size_t)BADGE_SIZE * BADGE_SIZE;
+        }
+        st.menu_scratch = malloc(menu_cap * 4);
+        st.menu_scratch_cap = st.menu_scratch ? menu_cap : 0;
+        st.badge_base = ghost_icon_create_bg(false);
+        st.badge = st.badge_base ? malloc((size_t)BADGE_SIZE * BADGE_SIZE * 4) : NULL;
+        st.badge_icon = calloc((size_t)BADGE_SIZE * BADGE_SIZE, 4);
+        st.badge_full = calloc((size_t)BADGE_SIZE * 2 * BADGE_SIZE * 2, 4);
+        if (!st.menu_scratch || !st.badge_base || !st.badge ||
+            !st.badge_icon || !st.badge_full) {
+            fprintf(stderr, "Failed to allocate menu and badge workspace\n");
+            free(st.menu_scratch);
+            free(st.badge);
+            free(st.badge_base);
+            return 1;
+        }
+        build_badge(&st);
+    }
+
     hiss_start();
 
     printf("Paint running. SPLAT: click or drag to throw glossy paint blobs.\n"
@@ -3008,6 +3016,9 @@ int main(void) {
     ringmenu_destroy(st.menu);
     free(st.menu_scratch);
     free(st.badge);
+    free(st.badge_base);
+    free(st.badge_icon);
+    free(st.badge_full);
     free(st.canvas);
     free(st.paint);
     free(st.field);

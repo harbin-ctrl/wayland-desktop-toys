@@ -1607,7 +1607,16 @@ int main(int argc, char **argv) {
             { .label = "QUIT" },
         };
         g_menu = ringmenu_create(items, 4);
-        if (!g_menu) fprintf(stderr, "balloons: no ring menu\n");
+    if (!g_menu) fprintf(stderr, "balloons: no ring menu\n");
+    if (g_menu) {
+        int menu_size = ringmenu_size(g_menu);
+        g_menu_scratch = malloc((size_t)menu_size * menu_size * 4);
+        if (!g_menu_scratch) {
+            fprintf(stderr, "balloons: failed to allocate menu workspace\n");
+            ringmenu_destroy(g_menu);
+            g_menu = NULL;
+        }
+    }
     }
     glGenTextures(1, &g_menu_tex);
     glBindTexture(GL_TEXTURE_2D, g_menu_tex);
@@ -2016,9 +2025,8 @@ int main(int argc, char **argv) {
             int mx, my, mw, mh;
             ringmenu_rect(g_menu, &mx, &my, &mw, &mh);
             if (ringmenu_take_dirty(g_menu)) {
-                if (!g_menu_scratch)
-                    g_menu_scratch = malloc((size_t)mw * mh * 4);
-                if (g_menu_scratch) {
+                if (g_menu_scratch && (size_t)mw * mh <=
+                    (size_t)ringmenu_size(g_menu) * ringmenu_size(g_menu)) {
                     memset(g_menu_scratch, 0, (size_t)mw * mh * 4);
                     ringmenu_draw(g_menu, g_menu_scratch, mw, mh, mx, my);
                     for (size_t i = 0; i < (size_t)mw * mh; i++) {
