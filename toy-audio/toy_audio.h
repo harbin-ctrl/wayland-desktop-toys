@@ -18,6 +18,7 @@
 
 #define TOY_AUDIO_NORMALIZE_TARGET 1.0f
 #define TOY_AUDIO_CLIP_THRESHOLD 0.9f
+#define TOY_AUDIO_LIMITER_RELEASE_SECONDS 0.08f
 #define TOY_AUDIO_QUIET_THRESHOLD 0.004f
 #define TOY_AUDIO_QUIET_SECONDS 0.25f
 
@@ -65,6 +66,7 @@ typedef struct {
     bool fading_out;
     float fade_gain;
     float fade_step;    
+    float limiter_gain;
     float quiet_recent_peak;
     float quiet_seconds;
 } ToyMixer;
