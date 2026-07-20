@@ -24,8 +24,18 @@ static void *render_thread(void *unused) {
         pthread_mutex_lock(&mixer_lock);
         if ((pass++ & 1) == 0) {
             toy_mixer_render(&mixer, mono, RENDER_FRAMES, false);
+            for (int i = 0; i < RENDER_FRAMES; ++i) {
+                assert(isfinite(mono[i]));
+                assert(fabsf(mono[i]) <=
+                       TOY_AUDIO_CLIP_THRESHOLD + 0.0001f);
+            }
         } else {
             toy_mixer_render_stereo(&mixer, stereo, RENDER_FRAMES, false);
+            for (int i = 0; i < RENDER_FRAMES * 2; ++i) {
+                assert(isfinite(stereo[i]));
+                assert(fabsf(stereo[i]) <=
+                       TOY_AUDIO_CLIP_THRESHOLD + 0.0001f);
+            }
         }
         pthread_mutex_unlock(&mixer_lock);
     }

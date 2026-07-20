@@ -24,6 +24,7 @@ void toy_mixer_init(ToyMixer *m, float initial_volume) {
     m->master_volume = initial_volume;
     m->master_volume_before_mute = initial_volume;
     m->fade_gain = 1.0f;
+    m->limiter_gain = 1.0f;
 }
 
 bool toy_mixer_reserve(ToyMixer *m, int max_samples) {
@@ -60,6 +61,8 @@ void toy_mixer_render(ToyMixer *m, float *out, int nsamples, bool suppress) {
     float master = (m->muted || suppress) ? 0.0f : m->master_volume;
     float gain = master * m->fade_gain;
     float peak = 0.0f;
+    const float limiter_release =
+        1.0f / (TOY_AUDIO_LIMITER_RELEASE_SECONDS * TA_RATE);
 
     for (int i = 0; i < nsamples; i++) {
         float sample = 0.0f;
@@ -108,19 +111,26 @@ void toy_mixer_render(ToyMixer *m, float *out, int nsamples, bool suppress) {
         }
 
         float mixed = sample * gain;
+        float mixed_abs = fabsf(mixed);
+        float limiter_target =
+            mixed_abs > TOY_AUDIO_CLIP_THRESHOLD
+                ? TOY_AUDIO_CLIP_THRESHOLD / mixed_abs
+                : 1.0f;
+        if (limiter_target < m->limiter_gain) {
+            m->limiter_gain = limiter_target;
+        } else {
+            m->limiter_gain +=
+                (1.0f - m->limiter_gain) * limiter_release;
+            if (m->limiter_gain > limiter_target) {
+                m->limiter_gain = limiter_target;
+            }
+        }
+        mixed *= m->limiter_gain;
         out[i] = mixed;
         float abs_val = fabsf(mixed);
         if (abs_val > peak) {
             peak = abs_val;
         }
-    }
-
-    if (peak > TOY_AUDIO_CLIP_THRESHOLD && peak > 0.0f) {
-        float scale = TOY_AUDIO_CLIP_THRESHOLD / peak;
-        for (int i = 0; i < nsamples; ++i) {
-            out[i] *= scale;
-        }
-        peak = TOY_AUDIO_CLIP_THRESHOLD;
     }
 
     m->quiet_recent_peak = peak;
@@ -141,6 +151,8 @@ void toy_mixer_render_stereo(ToyMixer *m, float *out, int nframes,
     float master = (m->muted || suppress) ? 0.0f : m->master_volume;
     float gain = master * m->fade_gain;
     float peak = 0.0f;
+    const float limiter_release =
+        1.0f / (TOY_AUDIO_LIMITER_RELEASE_SECONDS * TA_RATE);
 
     for (int i = 0; i < nframes; i++) {
         float left = 0.0f;
@@ -200,20 +212,28 @@ void toy_mixer_render_stereo(ToyMixer *m, float *out, int nframes,
 
         float mixed_l = left * gain;
         float mixed_r = right * gain;
+        float frame_peak = fmaxf(fabsf(mixed_l), fabsf(mixed_r));
+        float limiter_target =
+            frame_peak > TOY_AUDIO_CLIP_THRESHOLD
+                ? TOY_AUDIO_CLIP_THRESHOLD / frame_peak
+                : 1.0f;
+        if (limiter_target < m->limiter_gain) {
+            m->limiter_gain = limiter_target;
+        } else {
+            m->limiter_gain +=
+                (1.0f - m->limiter_gain) * limiter_release;
+            if (m->limiter_gain > limiter_target) {
+                m->limiter_gain = limiter_target;
+            }
+        }
+        mixed_l *= m->limiter_gain;
+        mixed_r *= m->limiter_gain;
         out[2 * i]     = mixed_l;
         out[2 * i + 1] = mixed_r;
         float abs_l = fabsf(mixed_l);
         float abs_r = fabsf(mixed_r);
         if (abs_l > peak) peak = abs_l;
         if (abs_r > peak) peak = abs_r;
-    }
-
-    if (peak > TOY_AUDIO_CLIP_THRESHOLD && peak > 0.0f) {
-        float scale = TOY_AUDIO_CLIP_THRESHOLD / peak;
-        for (int i = 0; i < 2 * nframes; ++i) {
-            out[i] *= scale;
-        }
-        peak = TOY_AUDIO_CLIP_THRESHOLD;
     }
 
     m->quiet_recent_peak = peak;
