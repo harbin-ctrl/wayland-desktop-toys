@@ -4331,7 +4331,8 @@ static void freerange_toplevel_close(void *data, struct xdg_toplevel *toplevel) 
     (void)toplevel;
     FreedomState *st = data;
     if (st) {
-        st->running = false;
+        /* Treat compositor/taskbar close exactly like the in-app QUIT action. */
+        freerange_request_graceful_shutdown(st);
     }
 }
 
