@@ -183,6 +183,10 @@ typedef struct {
     int dirty_x1;
     int dirty_y1;
     uint32_t *staging;
+    float *shade_dist_u;
+    float *shade_dist_c;
+    float *shade_dist_s;
+    size_t shade_scratch_cap;
 
     /* Reused by every splat; allocated once after the window is configured. */
     float *splat_own;
@@ -648,15 +652,12 @@ static void splat_shade_region(PaintState *st, int rx0, int ry0, int rx1, int ry
     int bw = cx1 - cx0 + 1;
     int bh = cy1 - cy0 + 1;
 
-    float *dist_u = malloc(sizeof(float) * (size_t)bw * (size_t)bh);
-    float *dist_c = malloc(sizeof(float) * (size_t)bw * (size_t)bh);
-    float *dist_s = malloc(sizeof(float) * (size_t)bw * (size_t)bh);
-    if (!dist_u || !dist_c || !dist_s) {
-        free(dist_u);
-        free(dist_c);
-        free(dist_s);
-        return;
-    }
+    size_t shade_need = (size_t)bw * (size_t)bh;
+    if (!st->shade_dist_u || !st->shade_dist_c || !st->shade_dist_s ||
+        shade_need > st->shade_scratch_cap) return;
+    float *dist_u = st->shade_dist_u;
+    float *dist_c = st->shade_dist_c;
+    float *dist_s = st->shade_dist_s;
 
     ShadeCtx k = {
         .pixels = pixels, .field = field, .cmap = cmap,
@@ -712,9 +713,6 @@ static void splat_shade_region(PaintState *st, int rx0, int ry0, int rx1, int ry
         run_rows(shade_color_pass, &k, ry1 - ry0 + 1);
     }
 
-    free(dist_u);
-    free(dist_c);
-    free(dist_s);
 }
 
 
@@ -2023,17 +2021,32 @@ static bool canvas_resize(PaintState *st, int new_w, int new_h) {
     float *new_field = calloc((size_t)new_w * (size_t)new_h, sizeof(float));
     uint8_t *new_cmap = malloc((size_t)new_w * (size_t)new_h);
     uint32_t *new_staging = malloc((size_t)new_w * (size_t)new_h * 4);
-    if (!new_canvas || !new_paint || !new_field || !new_cmap || !new_staging) {
+    size_t new_shade_cap = (size_t)new_w * (size_t)new_h;
+    float *new_shade_u = malloc(new_shade_cap * sizeof(float));
+    float *new_shade_c = malloc(new_shade_cap * sizeof(float));
+    float *new_shade_s = malloc(new_shade_cap * sizeof(float));
+    if (!new_canvas || !new_paint || !new_field || !new_cmap || !new_staging ||
+        !new_shade_u || !new_shade_c || !new_shade_s) {
         free(new_canvas);
         free(new_paint);
         free(new_field);
         free(new_cmap);
         free(new_staging);
+        free(new_shade_u);
+        free(new_shade_c);
+        free(new_shade_s);
         return false;
     }
     memset(new_cmap, COLOR_NONE, (size_t)new_w * (size_t)new_h);
     free(st->staging);
+    free(st->shade_dist_u);
+    free(st->shade_dist_c);
+    free(st->shade_dist_s);
     st->staging = new_staging;
+    st->shade_dist_u = new_shade_u;
+    st->shade_dist_c = new_shade_c;
+    st->shade_dist_s = new_shade_s;
+    st->shade_scratch_cap = new_shade_cap;
 
     if (st->canvas) {
         int min_w = new_w < st->width ? new_w : st->width;
@@ -3023,6 +3036,9 @@ int main(void) {
     free(st.field);
     free(st.color_map);
     free(st.staging);
+    free(st.shade_dist_u);
+    free(st.shade_dist_c);
+    free(st.shade_dist_s);
     free(st.splat_own);
     free(st.splat_vdist);
     free(st.splat_vlabel);
