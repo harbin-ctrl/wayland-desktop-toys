@@ -830,7 +830,8 @@ typedef struct {
     float time;
     int volume;
     int surface;
-    float pan;      
+    float pan;
+    uint64_t serial;
 } BounceEvent;
 
 typedef struct {
@@ -874,11 +875,12 @@ static void update_bounce_sound_style_for_mode(void) {
     mark_sounds_dirty(fmaxf(size_scale, 0.01f));
 }
 
-static AudioPredictBuffer g_audio_predict __attribute__((unused)) = {0};
+static AudioPredictBuffer g_audio_predict = {0};
 static AudioPredictQueueEntry g_audio_predict_queue[AUDIO_PREDICT_QUEUE_MAX] = {0};
-static float g_audio_sim_time __attribute__((unused)) = 0.0f;
+static float g_audio_sim_time = 0.0f;
 static float g_audio_predict_delay_seconds = AUDIO_PREDICT_DELAY_SECONDS;
 static float g_audio_predict_step_seconds = 1.0f / (float)FPS;
+static float g_audio_predict_poll_seconds = 1.0f / (float)FPS;
 enum {
     BOUNCE_SURFACE_FLOOR = 0,
     BOUNCE_SURFACE_CEILING = 1,
@@ -886,6 +888,12 @@ enum {
     BOUNCE_SURFACE_RIGHT = 3,
     BOUNCE_SURFACE_COUNT = 4
 };
+static uint64_t g_actual_bounce_serial[BOUNCE_SURFACE_COUNT] = {0};
+static uint64_t g_played_bounce_serial[BOUNCE_SURFACE_COUNT] = {0};
+static bool g_predict_audit = false;
+static uint64_t g_audit_expected[BOUNCE_SURFACE_COUNT] = {0};
+static uint64_t g_audit_selected[BOUNCE_SURFACE_COUNT] = {0};
+static uint64_t g_audit_committed[BOUNCE_SURFACE_COUNT] = {0};
 static RecentBouncePlayback g_recent_bounce_playbacks[RECENT_BOUNCE_PLAYBACK_COUNT] = {{0}};
 static int g_recent_bounce_playback_next = 0;
 static bool audio_is_perceptually_quiet(void) {
@@ -958,6 +966,7 @@ static KeyRepeatState g_speed_down_key = {false, 0.0f, 0.0f};
 
 static cubeb *g_audio_ctx = NULL;
 static cubeb_stream *g_audio_stream = NULL;
+static bool g_audio_output_latency_valid = false;
 
 __attribute__((hot))
 static long audio_data_cb(cubeb_stream *stream, void *user,
@@ -1006,6 +1015,7 @@ static void shutdown_audio(void) {
     g_volume_muted = false;
     g_volume_hud_alpha = 0.0f;
     g_volume_hud_time = 0.0f;
+    g_audio_output_latency_valid = false;
 }
 
 static bool init_audio(bool start_muted) {
@@ -1068,7 +1078,7 @@ static bool init_audio(bool start_muted) {
     return true;
 }
 
-void play_bounce_sound(int volume, float pan) {
+bool play_bounce_sound(int volume, float pan) {
     float size_scale = fmaxf(audio_state.current_size_scale, 0.05f);
 
     if (audio_state.bounce.dirty) {
@@ -1106,18 +1116,21 @@ void play_bounce_sound(int volume, float pan) {
     bool claimed = toy_mixer_claim_voice(
         &g_mixer, audio_state.bounce.length, &claim);
     audio_unlock();
-    if (!claimed) return;
+    if (!claimed) return false;
 
     bool copied = toy_mixer_copy_claimed_voice(
         &g_mixer, claim, &audio_state.bounce);
     audio_lock();
-    if (!copied ||
-        !toy_mixer_commit_voice(
+    bool committed =
+        copied &&
+        toy_mixer_commit_voice(
             &g_mixer, claim, audio_state.bounce.length,
-            size_factor * velocity_factor, l_gain, r_gain)) {
+            size_factor * velocity_factor, l_gain, r_gain);
+    if (!committed) {
         toy_mixer_cancel_voice(&g_mixer, claim);
     }
     audio_unlock();
+    return committed;
 }
 
 static void adjust_master_volume(float delta) {
@@ -1525,6 +1538,7 @@ static void update_ball_physics(float *ball_x, float *ball_y,
                                 float ball_diameter, float ball_diameter_normalized,
                                 double sim_delta,
                                 bool ball_grabbed, bool make_noise,
+                                uint64_t surface_serials[BOUNCE_SURFACE_COUNT],
                                 BounceEvent *events, int *event_count, int max_events,
                                 float event_time);
 
@@ -1554,7 +1568,16 @@ static void maybe_play_actual_bounce_sound(bool make_noise, float impact_speed, 
         return;
     }
     float ratio = impact_speed / baseline_speed;
-    play_bounce_sound(volume_from_impact_ratio(ratio), pan);
+    (void)play_bounce_sound(volume_from_impact_ratio(ratio), pan);
+}
+
+static void audit_actual_collision(bool predictive_pass, int surface,
+                                   float impact_speed, float baseline_speed) {
+    if (g_predict_audit && !predictive_pass &&
+        surface >= 0 && surface < BOUNCE_SURFACE_COUNT &&
+        impact_speed_is_audible(impact_speed, baseline_speed)) {
+        g_audit_expected[surface]++;
+    }
 }
 
 static void audio_predict_reset(float now_time);
@@ -1655,7 +1678,7 @@ static void probe_cubeb_start(void) {
     g_cubeb_probe.active = true;
 }
 
-static void probe_cubeb_handle_restart(void) {
+static void __attribute__((unused)) probe_cubeb_handle_restart(void) {
     if (poingo_atomic_set(&g_cubeb_probe_restart_requested, 0) == 0) {
         return;
     }
@@ -1666,25 +1689,23 @@ static void probe_cubeb_handle_restart(void) {
     probe_cubeb_start();
 }
 
-static void __attribute__((unused)) probe_cubeb_update(void) {
-    probe_cubeb_handle_restart();
-    if (!g_cubeb_probe.active) {
+static void update_audio_output_latency(void) {
+    static uint32_t last_update_ticks = 0;
+    if (!g_audio_stream) {
         return;
     }
     uint32_t now_ticks = poingo_ticks_ms();
-    uint32_t elapsed_since_start = now_ticks - g_cubeb_probe.start_ticks;
-    uint32_t update_interval_ms = (elapsed_since_start < 5000) ? 250u : 2000u;
-    if (now_ticks - g_cubeb_probe.last_update_ticks < update_interval_ms) {
+    if (last_update_ticks != 0 && now_ticks - last_update_ticks < 250u) {
         return;
     }
-    g_cubeb_probe.last_update_ticks = now_ticks;
+    last_update_ticks = now_ticks;
 
     uint32_t measured_latency = 0;
-    if (cubeb_stream_get_latency(g_cubeb_probe.stream, &measured_latency) == CUBEB_OK &&
+    if (cubeb_stream_get_latency(g_audio_stream, &measured_latency) == CUBEB_OK &&
         measured_latency > 0) {
-        g_audio_predict_delay_seconds = (float)measured_latency / (float)g_cubeb_probe.rate;
-    } else {
-        g_audio_predict_delay_seconds = (float)g_cubeb_probe.latency_frames / (float)g_cubeb_probe.rate;
+        g_audio_predict_delay_seconds =
+            (float)measured_latency / (float)SAMPLE_RATE;
+        g_audio_output_latency_valid = true;
     }
     if (g_audio_predict_delay_seconds < 0.0f) {
         g_audio_predict_delay_seconds = 0.0f;
@@ -1695,7 +1716,7 @@ static void __attribute__((unused)) probe_cubeb_update(void) {
 
 static inline void append_bounce_event(BounceEvent *events, int *event_count, int max_events,
                                        float event_time, float impact_speed, float baseline_speed,
-                                       int surface, float pan) {
+                                       int surface, float pan, uint64_t serial) {
     if (!events || !event_count || *event_count >= max_events) {
         return;
     }
@@ -1708,6 +1729,7 @@ static inline void append_bounce_event(BounceEvent *events, int *event_count, in
     events[*event_count].volume = volume;
     events[*event_count].surface = surface;
     events[*event_count].pan = pan;
+    events[*event_count].serial = serial;
     (*event_count)++;
 }
 
@@ -1722,7 +1744,8 @@ static float get_bounce_dedupe_window_seconds(void) {
     return dedupe_window;
 }
 
-static bool recent_bounce_playback_matches(const BounceEvent *ev) {
+static bool __attribute__((unused))
+recent_bounce_playback_matches(const BounceEvent *ev) {
     if (!ev) {
         return false;
     }
@@ -1815,7 +1838,8 @@ static int allocate_audio_predict_queue_slot(void) {
     return best_index;
 }
 
-static void reconcile_audio_predict_queue(const AudioPredictBuffer *buffer, float now_time) {
+static void __attribute__((unused))
+reconcile_audio_predict_queue(const AudioPredictBuffer *buffer, float now_time) {
     if (!buffer) {
         return;
     }
@@ -1836,7 +1860,8 @@ static void reconcile_audio_predict_queue(const AudioPredictBuffer *buffer, floa
     }
 }
 
-static void cleanup_audio_predict_queue(float now_time, float effective_delay) {
+static void __attribute__((unused))
+cleanup_audio_predict_queue(float now_time, float effective_delay) {
     for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
         AudioPredictQueueEntry *entry = &g_audio_predict_queue[i];
         if (!entry->active) {
@@ -1861,7 +1886,8 @@ static void cleanup_audio_predict_queue(float now_time, float effective_delay) {
     }
 }
 
-static void record_recent_bounce_playback(const BounceEvent *ev) {
+static void __attribute__((unused))
+record_recent_bounce_playback(const BounceEvent *ev) {
     if (!ev) {
         return;
     }
@@ -1875,9 +1901,18 @@ static void record_recent_bounce_playback(const BounceEvent *ev) {
     }
 }
 
-static void __attribute__((unused)) audio_predict_reset(float now_time) {
+static void audio_predict_reset(float now_time) {
     (void)now_time;
     clear_audio_predict_queue();
+    for (int surface = 0; surface < BOUNCE_SURFACE_COUNT; ++surface) {
+        if (g_actual_bounce_serial[surface] <
+            g_played_bounce_serial[surface]) {
+            g_actual_bounce_serial[surface] =
+                g_played_bounce_serial[surface];
+        }
+        g_played_bounce_serial[surface] =
+            g_actual_bounce_serial[surface];
+    }
     for (int i = 0; i < RECENT_BOUNCE_PLAYBACK_COUNT; ++i) {
         g_recent_bounce_playbacks[i].valid = false;
     }
@@ -1885,7 +1920,19 @@ static void __attribute__((unused)) audio_predict_reset(float now_time) {
 }
 
 static float get_audio_predict_effective_delay_seconds(void) {
-    float effective_delay = g_audio_predict_delay_seconds - AUDIO_PREDICT_ONSET_COMPENSATION_SECONDS;
+    /*
+     * The generated impact reaches its audible attack after playback starts,
+     * so onset time adds to—not subtracts from—the device latency that must
+     * be anticipated.
+     */
+    float effective_delay =
+        g_audio_predict_delay_seconds +
+        AUDIO_PREDICT_ONSET_COMPENSATION_SECONDS;
+    float minimum_lead =
+        g_audio_predict_poll_seconds + AUDIO_PREDICT_FIXED_STEP_SECONDS;
+    if (effective_delay < minimum_lead) {
+        effective_delay = minimum_lead;
+    }
     if (effective_delay < 0.0f) {
         effective_delay = 0.0f;
     } else if (effective_delay > AUDIO_PREDICT_SECONDS) {
@@ -1911,7 +1958,7 @@ static float get_audio_predict_horizon_seconds(void) {
 }
 
 
-static void __attribute__((unused)) build_audio_predict_buffer(AudioPredictBuffer *buffer,
+static void build_audio_predict_buffer(AudioPredictBuffer *buffer,
                                        float base_time,
                                        float ball_x, float ball_y,
                                        float ball_vx, float ball_vy,
@@ -1929,12 +1976,18 @@ static void __attribute__((unused)) build_audio_predict_buffer(AudioPredictBuffe
     float sim_vx = ball_vx;
     float sim_vy = ball_vy;
     int sim_dir = ball_vx_direction;
+    uint64_t sim_surface_serials[BOUNCE_SURFACE_COUNT];
+    memcpy(sim_surface_serials, g_actual_bounce_serial,
+           sizeof(sim_surface_serials));
     float step = AUDIO_PREDICT_FIXED_STEP_SECONDS;
     if (step_seconds > 0.0f && step_seconds < step) {
         step = step_seconds;
     }
     if (step <= 0.0001f) {
         step = AUDIO_PREDICT_FIXED_STEP_SECONDS;
+    }
+    if (step_seconds > 0.0001f) {
+        g_audio_predict_poll_seconds = step_seconds;
     }
     g_audio_predict_step_seconds = step;
     float horizon = get_audio_predict_horizon_seconds();
@@ -1948,6 +2001,7 @@ static void __attribute__((unused)) build_audio_predict_buffer(AudioPredictBuffe
                             ball_diameter, ball_diameter_normalized,
                             step,
                             false, true,
+                            sim_surface_serials,
                             buffer->events, &buffer->count, AUDIO_PREDICT_MAX_EVENTS,
                             base_time + t + step);
         t += step;
@@ -1970,38 +2024,47 @@ static void trigger_predictive_audio_with_timing(const AudioPredictBuffer *buffe
         return;
     }
 
-    reconcile_audio_predict_queue(buffer, now_time);
-
     float effective_delay = get_audio_predict_effective_delay_seconds();
     if (effective_delay < g_audio_predict_step_seconds) {
         effective_delay = g_audio_predict_step_seconds;
     }
     float target_time = now_time + effective_delay;
-    cleanup_audio_predict_queue(now_time, effective_delay);
     int timing_samples = 0;
     float timing_accum = 0.0f;
 
-    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
-        AudioPredictQueueEntry *entry = &g_audio_predict_queue[i];
-        if (!entry->active || entry->played) {
-            continue;
-        }
-        const BounceEvent *ev = &entry->event;
+    /*
+     * Use only this frame's fresh simulation.  The former persistent queue
+     * reconciled changing predictions in place and could associate playback
+     * with stale collision state.  A collision is emitted when its freshly
+     * predicted time enters the output-latency horizon, then the recent-event
+     * ring suppresses subsequent predictions of that same collision.
+     */
+    for (int i = 0; i < buffer->count; ++i) {
+        const BounceEvent *ev = &buffer->events[i];
         float event_time = ev->time;
         if (event_time > target_time) {
             continue;
         }
-
-        if (recent_bounce_playback_matches(ev)) {
-            entry->played = true;
+        if (event_time < now_time - AUDIO_PREDICT_EVENT_STALE_SECONDS) {
             continue;
         }
 
-        play_bounce_sound(ev->volume, ev->pan);
-        record_recent_bounce_playback(ev);
-        entry->played = true;
+        if (ev->surface < 0 || ev->surface >= BOUNCE_SURFACE_COUNT ||
+            ev->serial == 0 ||
+            ev->serial <= g_played_bounce_serial[ev->surface]) {
+            continue;
+        }
 
-        float expected_play_time = event_time + effective_delay;
+        if (g_predict_audit) {
+            g_audit_selected[ev->surface]++;
+        }
+        bool committed = play_bounce_sound(ev->volume, ev->pan);
+        if (g_predict_audit && committed) {
+            g_audit_committed[ev->surface]++;
+        }
+        g_played_bounce_serial[ev->surface] = ev->serial;
+
+        float expected_play_time = event_time - effective_delay;
         float timing_error = now_time - expected_play_time;
         timing_accum += timing_error;
         timing_samples++;
@@ -2017,7 +2080,7 @@ static void trigger_predictive_audio_with_timing(const AudioPredictBuffer *buffe
     }
 }
 
-static void __attribute__((unused)) trigger_predictive_audio(const AudioPredictBuffer *buffer, float now_time, bool make_noise) {
+static void trigger_predictive_audio(const AudioPredictBuffer *buffer, float now_time, bool make_noise) {
     trigger_predictive_audio_with_timing(buffer, now_time, make_noise, NULL, NULL);
 }
 
@@ -2029,6 +2092,7 @@ static void update_ball_physics(float *ball_x, float *ball_y,
                                 float ball_diameter, float ball_diameter_normalized,
                                 double sim_delta,
                                 bool ball_grabbed, bool make_noise,
+                                uint64_t surface_serials[BOUNCE_SURFACE_COUNT],
                                 BounceEvent *events, int *event_count, int max_events,
                                 float event_time) {
     if (ball_grabbed) {
@@ -2060,10 +2124,15 @@ static void update_ball_physics(float *ball_x, float *ball_y,
         *ball_x = border_inset + (border_inset - *ball_x);
         *ball_vx_direction = -*ball_vx_direction;
         float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
+        uint64_t serial = surface_serials
+                              ? ++surface_serials[BOUNCE_SURFACE_LEFT]
+                              : 0;
+        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_LEFT,
+                               fabsf(*ball_vx), natural_vx);
         if (predictive_pass) {
             append_bounce_event(events, event_count, max_events, event_time,
                                 fabsf(*ball_vx), natural_vx,
-                                BOUNCE_SURFACE_LEFT, pan);
+                                BOUNCE_SURFACE_LEFT, pan, serial);
         } else {
             maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(*ball_vx), natural_vx, pan);
         }
@@ -2073,10 +2142,15 @@ static void update_ball_physics(float *ball_x, float *ball_y,
         *ball_x = (right_edge - ball_diameter) - ((*ball_x + ball_diameter) - right_edge);
         *ball_vx_direction = -*ball_vx_direction;
         float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
+        uint64_t serial = surface_serials
+                              ? ++surface_serials[BOUNCE_SURFACE_RIGHT]
+                              : 0;
+        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_RIGHT,
+                               fabsf(*ball_vx), natural_vx);
         if (predictive_pass) {
             append_bounce_event(events, event_count, max_events, event_time,
                                 fabsf(*ball_vx), natural_vx,
-                                BOUNCE_SURFACE_RIGHT, pan);
+                                BOUNCE_SURFACE_RIGHT, pan, serial);
         } else {
             maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(*ball_vx), natural_vx, pan);
         }
@@ -2088,10 +2162,15 @@ static void update_ball_physics(float *ball_x, float *ball_y,
         float impact_vy = fabsf(*ball_vy);
         float ideal_vy = get_ideal_bounce_vy(ball_diameter_normalized, gravity);
         float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
+        uint64_t serial = surface_serials
+                              ? ++surface_serials[BOUNCE_SURFACE_CEILING]
+                              : 0;
+        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_CEILING,
+                               impact_vy, ideal_vy);
         if (predictive_pass) {
             append_bounce_event(events, event_count, max_events, event_time,
                                 impact_vy, ideal_vy,
-                                BOUNCE_SURFACE_CEILING, pan);
+                                BOUNCE_SURFACE_CEILING, pan, serial);
         } else {
             maybe_play_actual_bounce_sound(immediate_audio_pass, impact_vy, ideal_vy, pan);
         }
@@ -2115,10 +2194,15 @@ static void update_ball_physics(float *ball_x, float *ball_y,
         }
 
         float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
+        uint64_t serial = surface_serials
+                              ? ++surface_serials[BOUNCE_SURFACE_FLOOR]
+                              : 0;
+        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_FLOOR,
+                               fabsf(impact_vy), ideal_vy);
         if (predictive_pass) {
             append_bounce_event(events, event_count, max_events, event_time,
                                 fabsf(impact_vy), ideal_vy,
-                                BOUNCE_SURFACE_FLOOR, pan);
+                                BOUNCE_SURFACE_FLOOR, pan, serial);
         } else {
             maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(impact_vy), ideal_vy, pan);
         }
@@ -4985,6 +5069,17 @@ static int run_freerange_wayland(bool start_muted) {
         float scaled_prop = total_prop * g_freerange_ball_scale;
         st.ball_diameter = 124.0f * scaled_prop;
         st.ball_diameter_norm = st.ball_diameter / (float)st.height;
+        g_audio_sim_time = 0.0f;
+        audio_predict_reset(g_audio_sim_time);
+        build_audio_predict_buffer(&g_audio_predict,
+                                   g_audio_sim_time,
+                                   st.ball_x, st.ball_y,
+                                   st.ball_vx, st.ball_vy,
+                                   st.ball_vx_direction,
+                                   st.width,
+                                   0.0f, 0.0f,
+                                   st.ball_diameter, st.ball_diameter_norm,
+                                   1.0f / frames_per_second);
     }
 
     st.performance_frequency = poingo_perf_freq();
@@ -5090,6 +5185,7 @@ static int run_freerange_wayland(bool start_muted) {
     }
 
     while (st.running) {
+        bool was_ball_grabbed = st.ball_grabbed;
         bool miss_this_frame  = false;
         {
             struct timespec _pe;
@@ -5174,6 +5270,8 @@ static int run_freerange_wayland(bool start_muted) {
             break;
         }
 
+        update_audio_output_latency();
+        bool use_audio_prediction = g_audio_output_latency_valid;
         float frame_elapsed = (float)delta_seconds;
         update_volume_hud(frame_elapsed);
         update_speed_hud(frame_elapsed);
@@ -5196,6 +5294,10 @@ static int run_freerange_wayland(bool start_muted) {
         }
 
         bool hud_visible = freerange_gl_update_hud(&st);
+
+        if (was_ball_grabbed && !st.ball_grabbed) {
+            audio_predict_reset(g_audio_sim_time);
+        }
 
         if (st.resize_pending) {
             wl_egl_window_resize(st.egl_window, st.width, st.height, 0, 0);
@@ -5235,8 +5337,32 @@ static int run_freerange_wayland(bool start_muted) {
                                 0.0f, 0.0f,
                                 st.ball_diameter, st.ball_diameter_norm,
                                 sim_delta,
-                                st.ball_grabbed, st.make_noise,
+                                st.ball_grabbed,
+                                !use_audio_prediction && st.make_noise,
+                                g_actual_bounce_serial,
                                 NULL, NULL, 0, 0.0f);
+        }
+
+        g_audio_sim_time += (float)sim_delta;
+        if (use_audio_prediction &&
+            !st.ball_grabbed && !st.ball_cleared) {
+            uint64_t apb_t0 = poingo_perf_counter();
+            build_audio_predict_buffer(&g_audio_predict,
+                                       g_audio_sim_time,
+                                       st.ball_x, st.ball_y,
+                                       st.ball_vx, st.ball_vy,
+                                       st.ball_vx_direction,
+                                       st.width,
+                                       0.0f, 0.0f,
+                                       st.ball_diameter, st.ball_diameter_norm,
+                                       (float)sim_delta);
+            double apb_ms =
+                get_perf_seconds(apb_t0, poingo_perf_counter()) * 1000.0;
+            apb_ms_sum += apb_ms;
+            apb_count++;
+            if (apb_ms > apb_ms_max) apb_ms_max = apb_ms;
+            trigger_predictive_audio(
+                &g_audio_predict, g_audio_sim_time, st.make_noise);
         }
 
         if (st.shutdown_pending) {
@@ -5730,6 +5856,31 @@ static int run_freerange_wayland(bool start_muted) {
         }
     } 
 
+    if (g_predict_audit) {
+        static const char *surface_names[BOUNCE_SURFACE_COUNT] = {
+            "floor", "ceiling", "left-wall", "right-wall"
+        };
+        uint64_t expected_total = 0;
+        uint64_t selected_total = 0;
+        uint64_t committed_total = 0;
+        for (int surface = 0; surface < BOUNCE_SURFACE_COUNT; ++surface) {
+            expected_total += g_audit_expected[surface];
+            selected_total += g_audit_selected[surface];
+            committed_total += g_audit_committed[surface];
+            fprintf(stderr,
+                    "predict audit %s: expected=%llu selected=%llu committed=%llu\n",
+                    surface_names[surface],
+                    (unsigned long long)g_audit_expected[surface],
+                    (unsigned long long)g_audit_selected[surface],
+                    (unsigned long long)g_audit_committed[surface]);
+        }
+        fprintf(stderr,
+                "predict audit total: expected=%llu selected=%llu committed=%llu\n",
+                (unsigned long long)expected_total,
+                (unsigned long long)selected_total,
+                (unsigned long long)committed_total);
+    }
+
     if (fr_log) {
         fflush(fr_log);
         fclose(fr_log);
@@ -5820,6 +5971,7 @@ int main(int argc, char *argv[]) {
             printf("  --light-color <color> Set the light ball color (format: R,G,B or #RRGGBB)\n");
             printf("  --dark-color <color>  Set the dark ball color (format: R,G,B or #RRGGBB)\n");
             printf("  --start-size <scale>  Set initial ball size (0.25 to 2.0)\n");
+            printf("  --audit-predict       Count expected and predicted impacts\n");
             printf("  --debug               Write performance diagnostics\n");
             printf("  --help, -h            Show this help message\n");
             return 0;
@@ -5852,6 +6004,8 @@ int main(int argc, char *argv[]) {
             i++;
         } else if (strcmp(argv[i], "--debug") == 0) {
             g_debug_mode = true;
+        } else if (strcmp(argv[i], "--audit-predict") == 0) {
+            g_predict_audit = true;
         }
     }
 
