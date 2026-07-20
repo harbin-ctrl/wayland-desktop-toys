@@ -290,7 +290,7 @@ static float g_ball_tilt_deg = 15.0f;
 static bool g_background_needs_refresh = false;
 
 static uint32_t gcd_u32(uint32_t a, uint32_t b);
-static uint32_t *regen_make_shuffled_order(uint32_t total);
+static void regen_make_shuffled_order(uint32_t *order, uint32_t total);
 static inline float clamp_freerange_ball_scale(float value);
 static float remap_normalized_scale_to_sound(float normalized_scale);
 void mark_sounds_dirty(float size_scale);
@@ -2522,14 +2522,8 @@ static uint32_t gcd_u32(uint32_t a, uint32_t b) {
     return a;
 }
 
-static uint32_t *regen_make_shuffled_order(uint32_t total) {
-    if (total == 0) {
-        return NULL;
-    }
-    uint32_t *order = (uint32_t *)malloc((size_t)total * sizeof(uint32_t));
-    if (!order) {
-        return NULL;
-    }
+static void regen_make_shuffled_order(uint32_t *order, uint32_t total) {
+    if (!order || total == 0) return;
     for (uint32_t i = 0; i < total; i++) {
         order[i] = i;
     }
@@ -2539,7 +2533,6 @@ static uint32_t *regen_make_shuffled_order(uint32_t total) {
         order[i] = order[j];
         order[j] = tmp;
     }
-    return order;
 }
 
 static const char *freerange_vert_shader_text =
@@ -2664,6 +2657,12 @@ typedef struct {
     int color_regen_block_size;
     float regen_ms_per_block;
     RegenWorkerCtx *regen_worker_ctx;
+    RegenWorkerCtx regen_ctx_storage;
+    PoingoAtomic *regen_unit_done_storage;
+    uint32_t *regen_order_storage;
+    pthread_t **regen_thread_storage;
+    uint32_t regen_workspace_units;
+    int regen_workspace_threads;
     pthread_t    **regen_threads;
     int             regen_thread_count;
     int             regen_units_uploaded;
@@ -2806,14 +2805,10 @@ static void freerange_regen_workers_shutdown(FreedomState *st) {
                 poingo_thread_wait(st->regen_threads[t], NULL);
             }
         }
-        free(st->regen_threads);
         st->regen_threads = NULL;
         st->regen_thread_count = 0;
     }
     if (st->regen_worker_ctx) {
-        free(st->regen_worker_ctx->unit_done);
-        free(st->regen_worker_ctx->regen_order);
-        free(st->regen_worker_ctx);
         st->regen_worker_ctx = NULL;
     }
     st->regen_units_uploaded = 0;
@@ -2946,6 +2941,34 @@ static int freerange_regen_ideal_block_size(float ms_per_block, int frame_count,
     return rounded;
 }
 
+static bool freerange_regen_workspace_prepare(FreedomState *st,
+                                               const FreedomFrameSet *frames) {
+    if (!st || !frames || frames->frame_count <= 0 || frames->frame_h <= 0) return false;
+    if (st->regen_workspace_units > 0) return true;
+    uint32_t units = (uint32_t)frames->frame_count *
+                     (uint32_t)((frames->frame_h + FREERANGE_REGEN_BLOCK_SIZE - 1) /
+                                FREERANGE_REGEN_BLOCK_SIZE);
+    int threads = poingo_cpu_count() - 1;
+    if (threads < 1) threads = 1;
+    if (units == 0) return false;
+    st->regen_unit_done_storage = calloc(units, sizeof(*st->regen_unit_done_storage));
+    st->regen_order_storage = malloc((size_t)units * sizeof(*st->regen_order_storage));
+    st->regen_thread_storage = calloc((size_t)threads, sizeof(*st->regen_thread_storage));
+    if (!st->regen_unit_done_storage || !st->regen_order_storage ||
+        !st->regen_thread_storage) {
+        free(st->regen_unit_done_storage);
+        free(st->regen_order_storage);
+        free(st->regen_thread_storage);
+        st->regen_unit_done_storage = NULL;
+        st->regen_order_storage = NULL;
+        st->regen_thread_storage = NULL;
+        return false;
+    }
+    st->regen_workspace_units = units;
+    st->regen_workspace_threads = threads;
+    return true;
+}
+
 static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet *frames) {
     if (!st || !frames || !frames->frames || frames->frame_count <= 0 || frames->frame_h <= 0) {
         return;
@@ -2980,11 +3003,13 @@ static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet 
 
     freerange_regen_workers_shutdown(st);
 
-    RegenWorkerCtx *ctx = calloc(1, sizeof(RegenWorkerCtx));
-    if (!ctx) return;
-
-    ctx->unit_done = calloc(total_units, sizeof(PoingoAtomic));
-    if (!ctx->unit_done) { free(ctx); return; }
+    if (!st->regen_unit_done_storage || !st->regen_order_storage ||
+        !st->regen_thread_storage || total_units > st->regen_workspace_units) return;
+    RegenWorkerCtx *ctx = &st->regen_ctx_storage;
+    memset(ctx, 0, sizeof(*ctx));
+    memset(st->regen_unit_done_storage, 0,
+           (size_t)total_units * sizeof(*st->regen_unit_done_storage));
+    ctx->unit_done = st->regen_unit_done_storage;
 
     ctx->frames          = (FreedomFrameSet *)frames;
     ctx->block_size      = block_size;
@@ -2992,7 +3017,8 @@ static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet 
     ctx->regen_start     = start;
     ctx->regen_stride    = stride;
     ctx->regen_total     = total_units;
-    ctx->regen_order     = regen_make_shuffled_order(total_units);
+    regen_make_shuffled_order(st->regen_order_storage, total_units);
+    ctx->regen_order     = st->regen_order_storage;
     ctx->regen_mode      = st->color_regen_mode;
     ctx->angle_period    = st->color_regen_angle_period;
     ctx->shadow_pixels   = st->color_regen_shadow_pixels;
@@ -3012,11 +3038,9 @@ static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet 
     if (thread_count < 1) thread_count = 1;
     if (thread_count > (int)total_units) thread_count = (int)total_units;
 
-    st->regen_threads = calloc((size_t)thread_count, sizeof(pthread_t *));
-    if (!st->regen_threads) {
-        freerange_regen_workers_shutdown(st);
-        return;
-    }
+    st->regen_threads = st->regen_thread_storage;
+    memset(st->regen_threads, 0,
+           (size_t)thread_count * sizeof(*st->regen_threads));
 
     int spawned = 0;
     for (int t = 0; t < thread_count; t++) {
@@ -5105,7 +5129,8 @@ static int run_freerange_wayland(bool start_muted) {
     if (use_blank_frames) {
         st.frames_ref = &frames;
         st.color_regen_angle_period = angle_period;
-        if (!freerange_color_regen_prepare_assets(&st, &frames)) {
+        if (!freerange_color_regen_prepare_assets(&st, &frames) ||
+            !freerange_regen_workspace_prepare(&st, &frames)) {
             use_blank_frames = false;
         } else {
             freerange_color_regen_start(&st, &frames);
@@ -5123,6 +5148,27 @@ static int run_freerange_wayland(bool start_muted) {
         }
         st.frames_ref = &frames;
         st.color_regen_angle_period = angle_period;
+        if (!freerange_regen_workspace_prepare(&st, &frames)) {
+            fprintf(stderr, "Failed to allocate regeneration workspace\n");
+            freerange_destroy_frames(&frames);
+            shutdown_audio();
+            eglDestroyContext(st.egl_display, st.egl_context);
+            eglTerminate(st.egl_display);
+            wl_display_disconnect(st.display);
+            return 1;
+        }
+    }
+
+    /* Reserve regeneration assets even when the initial frame set was fully
+     * generated. Runtime color/mode changes must never allocate. */
+    if (!freerange_color_regen_prepare_assets(&st, &frames)) {
+        fprintf(stderr, "Failed to allocate regeneration assets\n");
+        freerange_destroy_frames(&frames);
+        shutdown_audio();
+        eglDestroyContext(st.egl_display, st.egl_context);
+        eglTerminate(st.egl_display);
+        wl_display_disconnect(st.display);
+        return 1;
     }
 
     st.surface = wl_compositor_create_surface(st.compositor);
@@ -5245,6 +5291,16 @@ static int run_freerange_wayland(bool start_muted) {
     }
     free(light_drop);
     free(dark_drop);
+    if (g_menu) {
+        int menu_size = ringmenu_size(g_menu);
+        g_menu_scratch_cap = (size_t)menu_size * menu_size;
+        g_menu_scratch = malloc(g_menu_scratch_cap * 4);
+        if (!g_menu_scratch) {
+            fprintf(stderr, "Failed to allocate menu workspace\n");
+            ringmenu_destroy(g_menu);
+            g_menu = NULL;
+        }
+    }
     glGenTextures(1, &g_menu_tex);
     glBindTexture(GL_TEXTURE_2D, g_menu_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -5974,12 +6030,7 @@ static int run_freerange_wayland(bool start_muted) {
                 }
                 if (menu_redraw) {
                     size_t need = (size_t)mw * mh;
-                    if (g_menu_scratch_cap < need) {
-                        free(g_menu_scratch);
-                        g_menu_scratch = malloc(need * 4);
-                        g_menu_scratch_cap = g_menu_scratch ? need : 0;
-                    }
-                    if (g_menu_scratch) {
+                    if (g_menu_scratch && need <= g_menu_scratch_cap) {
                         memset(g_menu_scratch, 0, (size_t)mw * mh * 4);
                         if (g_picker_slot >= 0) {
                             ringmenu_field_draw(g_menu, g_picker_slot,
@@ -6183,6 +6234,9 @@ static int run_freerange_wayland(bool start_muted) {
     shutdown_audio();
     if (g_menu) { ringmenu_destroy(g_menu); g_menu = NULL; }
     if (g_menu_scratch) { free(g_menu_scratch); g_menu_scratch = NULL; }
+    free(st.regen_unit_done_storage);
+    free(st.regen_order_storage);
+    free(st.regen_thread_storage);
     return 0;
 }
 
