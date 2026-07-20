@@ -70,11 +70,32 @@ void toy_mixer_render(ToyMixer *m, float *out, int nsamples, bool suppress) {
                 voice->snapshot_data1 &&
                 voice->snapshot_data2 &&
                 voice->current_pos < voice->snapshot_length) {
-                sample += (voice->snapshot_data1[voice->current_pos] +
-                           voice->snapshot_data2[voice->current_pos]) * 0.5f *
-                           voice->volume_scale;
+                float contribution =
+                    (voice->snapshot_data1[voice->current_pos] +
+                     voice->snapshot_data2[voice->current_pos]) * 0.5f *
+                    voice->volume_scale;
+                if (voice->steal_fade_pos < TOY_AUDIO_STEAL_CROSSFADE) {
+                    float t = (float)(voice->steal_fade_pos + 1) /
+                              (float)TOY_AUDIO_STEAL_CROSSFADE;
+                    sample +=
+                        voice->steal_tail_l[voice->steal_fade_pos] *
+                            (1.0f - t) +
+                        contribution * t;
+                    voice->steal_fade_pos++;
+                } else {
+                    sample += contribution;
+                }
                 voice->current_pos++;
-            } else if (voice->current_pos >= voice->snapshot_length) {
+            } else if (voice->preparing &&
+                       voice->steal_fade_pos <
+                           TOY_AUDIO_STEAL_CROSSFADE) {
+                float t = (float)(voice->steal_fade_pos + 1) /
+                          (float)TOY_AUDIO_STEAL_CROSSFADE;
+                sample += voice->steal_tail_l[voice->steal_fade_pos] *
+                          (1.0f - t);
+                voice->steal_fade_pos++;
+            } else if (!voice->preparing &&
+                       voice->current_pos >= voice->snapshot_length) {
                 voice->playing = false;
                 voice->current_pos = 0;
             }
@@ -140,15 +161,32 @@ void toy_mixer_render_stereo(ToyMixer *m, float *out, int nframes,
                 if (voice->steal_fade_pos < TOY_AUDIO_STEAL_CROSSFADE) {
                     float t = (float)(voice->steal_fade_pos + 1) /
                               (float)TOY_AUDIO_STEAL_CROSSFADE;
-                    left += voice->steal_tail_l[voice->steal_fade_pos] * (1.0f - t) + new_left * t;
-                    right += voice->steal_tail_r[voice->steal_fade_pos] * (1.0f - t) + new_right * t;
+                    left +=
+                        voice->steal_tail_l[voice->steal_fade_pos] *
+                            (1.0f - t) +
+                        new_left * t;
+                    right +=
+                        voice->steal_tail_r[voice->steal_fade_pos] *
+                            (1.0f - t) +
+                        new_right * t;
                     voice->steal_fade_pos++;
                 } else {
                     left += new_left;
                     right += new_right;
                 }
                 voice->current_pos++;
-            } else if (voice->current_pos >= voice->snapshot_length) {
+            } else if (voice->preparing &&
+                       voice->steal_fade_pos <
+                           TOY_AUDIO_STEAL_CROSSFADE) {
+                float t = (float)(voice->steal_fade_pos + 1) /
+                          (float)TOY_AUDIO_STEAL_CROSSFADE;
+                left += voice->steal_tail_l[voice->steal_fade_pos] *
+                        (1.0f - t);
+                right += voice->steal_tail_r[voice->steal_fade_pos] *
+                         (1.0f - t);
+                voice->steal_fade_pos++;
+            } else if (!voice->preparing &&
+                       voice->current_pos >= voice->snapshot_length) {
                 voice->playing = false;
                 voice->current_pos = 0;
             }
@@ -194,36 +232,37 @@ void toy_mixer_start_voice(ToyMixer *m, const ToySamplePair *pair,
     toy_mixer_start_voice_panned(m, pair, volume_scale, 1.0f, 1.0f);
 }
 
-void toy_mixer_start_voice_panned(ToyMixer *m, const ToySamplePair *pair,
-                                  float volume_scale,
-                                  float l_gain, float r_gain) {
-    if (!m || !pair || !pair->data1 || !pair->data2 || pair->length <= 0) {
-        return;
-    }
-
+bool toy_mixer_claim_voice(ToyMixer *m, int sample_length,
+                           ToyVoiceClaim *claim) {
+    if (!m || !claim || sample_length <= 0) return false;
+    claim->voice_index = -1;
+    claim->generation = 0;
     int voice_index = -1;
-    int oldest_voice = 0;
-    int max_pos = 0;
+    int oldest_voice = -1;
+    int max_pos = -1;
 
     for (int i = 0; i < TOY_AUDIO_MAX_VOICES; ++i) {
-        if (!m->voices[i].playing) {
+        ToyVoice *voice = &m->voices[i];
+        if (!voice->playing && !voice->preparing &&
+            voice->snapshot_capacity >= sample_length) {
             voice_index = i;
             break;
         }
-        if (m->voices[i].current_pos > max_pos) {
-            max_pos = m->voices[i].current_pos;
+        if (voice->playing && voice->snapshot_capacity >= sample_length &&
+            voice->current_pos > max_pos) {
+            max_pos = voice->current_pos;
             oldest_voice = i;
         }
     }
 
     if (voice_index == -1) {
+        if (oldest_voice < 0) return false;
         voice_index = oldest_voice;
     }
 
     ToyVoice *voice = &m->voices[voice_index];
 
-    if (voice_index == oldest_voice && voice->playing &&
-        voice->snapshot_data1 && voice->snapshot_data2) {
+    if (voice->playing && voice->snapshot_data1 && voice->snapshot_data2) {
         int remaining = voice->snapshot_length - voice->current_pos;
         if (remaining < 0) remaining = 0;
         for (int i = 0; i < TOY_AUDIO_STEAL_CROSSFADE; ++i) {
@@ -243,18 +282,78 @@ void toy_mixer_start_voice_panned(ToyMixer *m, const ToySamplePair *pair,
         voice->steal_fade_pos = TOY_AUDIO_STEAL_CROSSFADE;
     }
 
-    if (voice->snapshot_capacity >= pair->length) {
-        memcpy(voice->snapshot_data1, pair->data1,
-               (size_t)pair->length * sizeof(float));
-        memcpy(voice->snapshot_data2, pair->data2,
-               (size_t)pair->length * sizeof(float));
-        voice->snapshot_length = pair->length;
-        voice->current_pos = 0;
-        voice->playing = true;
-        voice->volume_scale = volume_scale;
-        voice->l_gain = l_gain;
-        voice->r_gain = r_gain;
-        m->quiet_seconds = 0.0f;
+    voice->playing = false;
+    voice->preparing = true;
+    voice->generation++;
+    if (voice->generation == 0) voice->generation = 1;
+    claim->voice_index = voice_index;
+    claim->generation = voice->generation;
+    return true;
+}
+
+static ToyVoice *claimed_voice(ToyMixer *m, ToyVoiceClaim claim) {
+    if (!m || claim.voice_index < 0 ||
+        claim.voice_index >= TOY_AUDIO_MAX_VOICES) {
+        return NULL;
+    }
+    ToyVoice *voice = &m->voices[claim.voice_index];
+    if (!voice->preparing || voice->generation != claim.generation) {
+        return NULL;
+    }
+    return voice;
+}
+
+bool toy_mixer_copy_claimed_voice(ToyMixer *m, ToyVoiceClaim claim,
+                                  const ToySamplePair *pair) {
+    if (!pair || !pair->data1 || !pair->data2 || pair->length <= 0) {
+        return false;
+    }
+    ToyVoice *voice = claimed_voice(m, claim);
+    if (!voice || voice->snapshot_capacity < pair->length) return false;
+    memcpy(voice->snapshot_data1, pair->data1,
+           (size_t)pair->length * sizeof(float));
+    memcpy(voice->snapshot_data2, pair->data2,
+           (size_t)pair->length * sizeof(float));
+    return true;
+}
+
+bool toy_mixer_commit_voice(ToyMixer *m, ToyVoiceClaim claim,
+                            int sample_length, float volume_scale,
+                            float l_gain, float r_gain) {
+    ToyVoice *voice = claimed_voice(m, claim);
+    if (!voice || sample_length <= 0 ||
+        sample_length > voice->snapshot_capacity) {
+        return false;
+    }
+    voice->snapshot_length = sample_length;
+    voice->current_pos = 0;
+    voice->volume_scale = volume_scale;
+    voice->l_gain = l_gain;
+    voice->r_gain = r_gain;
+    voice->preparing = false;
+    voice->playing = true;
+    m->quiet_seconds = 0.0f;
+    return true;
+}
+
+void toy_mixer_cancel_voice(ToyMixer *m, ToyVoiceClaim claim) {
+    ToyVoice *voice = claimed_voice(m, claim);
+    if (!voice) return;
+    voice->preparing = false;
+    voice->playing = false;
+    voice->current_pos = 0;
+}
+
+void toy_mixer_start_voice_panned(ToyMixer *m, const ToySamplePair *pair,
+                                  float volume_scale,
+                                  float l_gain, float r_gain) {
+    if (!m || !pair) return;
+    ToyVoiceClaim claim;
+    if (!toy_mixer_claim_voice(m, pair->length, &claim)) return;
+    if (!toy_mixer_copy_claimed_voice(m, claim, pair) ||
+        !toy_mixer_commit_voice(m, claim, pair->length, volume_scale,
+                                l_gain, r_gain)) {
+        toy_mixer_cancel_voice(m, claim);
     }
 }
 

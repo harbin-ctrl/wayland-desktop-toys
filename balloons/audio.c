@@ -307,7 +307,27 @@ void set_bounce_sound_style(BounceSoundStyle style) {
 }
 
 static void start_voice(const SamplePair *pair, float base_volume) {
-    toy_mixer_start_voice(&g_mixer, pair, base_volume);
+    ToyVoiceClaim claim;
+    audio_lock();
+    bool claimed = toy_mixer_claim_voice(&g_mixer, pair->length, &claim);
+    audio_unlock();
+    if (!claimed) return;
+
+    /*
+     * Sample synthesis and snapshot copying share this lock so a regenerated
+     * source cannot change underneath the unlocked copy.
+     */
+    pthread_mutex_lock(&g_synth_lock);
+    bool copied = toy_mixer_copy_claimed_voice(&g_mixer, claim, pair);
+    pthread_mutex_unlock(&g_synth_lock);
+
+    audio_lock();
+    if (!copied ||
+        !toy_mixer_commit_voice(&g_mixer, claim, pair->length,
+                                base_volume, 1.0f, 1.0f)) {
+        toy_mixer_cancel_voice(&g_mixer, claim);
+    }
+    audio_unlock();
 }
 
 static float base_volume_for(int volume, float size_scale) {
@@ -380,8 +400,8 @@ void play_bounce_sound(int volume) {
     ensure_bounce_sound();
     audio_lock();
     float size_scale = fmaxf(audio_state.current_size_scale, 0.05f);
-    start_voice(&audio_state.bounce, base_volume_for(volume, size_scale));
     audio_unlock();
+    start_voice(&audio_state.bounce, base_volume_for(volume, size_scale));
 }
 
 void play_pop_sound(int volume) {
@@ -392,8 +412,8 @@ void play_pop_sound(int volume) {
     int idx = rand() % POP_VARIATIONS;
     audio_lock();
     float size_scale = fmaxf(audio_state.pending_size_scale, 0.05f);
-    start_voice(&g_pop_variations[idx], base_volume_for(volume, size_scale));
     audio_unlock();
+    start_voice(&g_pop_variations[idx], base_volume_for(volume, size_scale));
 }
 
 void play_thump_sound(int volume) {
@@ -403,8 +423,8 @@ void play_thump_sound(int volume) {
     ensure_thump_sound();
     audio_lock();
     float size_scale = fmaxf(audio_state.current_size_scale, 0.05f);
-    start_voice(&audio_state.thump, base_volume_for(volume, size_scale));
     audio_unlock();
+    start_voice(&audio_state.thump, base_volume_for(volume, size_scale));
 }
 
 void play_thunder_sound(float distance01) {
@@ -417,9 +437,7 @@ void play_thunder_sound(float distance01) {
         return;
     }
     float volume = THUNDER_BASE_VOLUME * (1.0f - THUNDER_DISTANCE_ATTEN * d);
-    audio_lock();
     start_voice(&g_thunder[idx], volume);
-    audio_unlock();
 }
 
 
@@ -591,8 +609,8 @@ static void *synth_thread_main(void *arg) {
 
         audio_lock();
         audio_state.whoosh.length = length;
-        start_voice(&audio_state.whoosh, 1.0f);
         audio_unlock();
+        start_voice(&audio_state.whoosh, 1.0f);
 
         if (g_synth_trace) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
