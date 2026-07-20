@@ -11,7 +11,7 @@
 
 #define TA_BOUNCE_MAX_DECAY 0.9f
 #define TA_BOUNCE_ATTACK 0.005f
-#define TA_BOUNCE_TAIL_MULTIPLIER 6.0f
+#define TA_BOUNCE_TAIL_MULTIPLIER 2.5f
 #define TA_BOUNCE_BUFFER_SLACK 2048
 
 static float *g_nostalgia_dry;
@@ -72,7 +72,7 @@ void toy_mixer_render(ToyMixer *m, float *out, int nsamples, bool suppress) {
                 voice->current_pos < voice->snapshot_length) {
                 sample += (voice->snapshot_data1[voice->current_pos] +
                            voice->snapshot_data2[voice->current_pos]) * 0.5f *
-                          voice->volume_scale;
+                           voice->volume_scale;
                 voice->current_pos++;
             } else if (voice->current_pos >= voice->snapshot_length) {
                 voice->playing = false;
@@ -135,8 +135,18 @@ void toy_mixer_render_stereo(ToyMixer *m, float *out, int nframes,
                     (voice->snapshot_data1[voice->current_pos] +
                      voice->snapshot_data2[voice->current_pos]) * 0.5f *
                     voice->volume_scale;
-                left  += contribution * voice->l_gain;
-                right += contribution * voice->r_gain;
+                float new_left = contribution * voice->l_gain;
+                float new_right = contribution * voice->r_gain;
+                if (voice->steal_fade_pos < TOY_AUDIO_STEAL_CROSSFADE) {
+                    float t = (float)(voice->steal_fade_pos + 1) /
+                              (float)TOY_AUDIO_STEAL_CROSSFADE;
+                    left += voice->steal_tail_l[voice->steal_fade_pos] * (1.0f - t) + new_left * t;
+                    right += voice->steal_tail_r[voice->steal_fade_pos] * (1.0f - t) + new_right * t;
+                    voice->steal_fade_pos++;
+                } else {
+                    left += new_left;
+                    right += new_right;
+                }
                 voice->current_pos++;
             } else if (voice->current_pos >= voice->snapshot_length) {
                 voice->playing = false;
@@ -211,6 +221,27 @@ void toy_mixer_start_voice_panned(ToyMixer *m, const ToySamplePair *pair,
     }
 
     ToyVoice *voice = &m->voices[voice_index];
+
+    if (voice_index == oldest_voice && voice->playing &&
+        voice->snapshot_data1 && voice->snapshot_data2) {
+        int remaining = voice->snapshot_length - voice->current_pos;
+        if (remaining < 0) remaining = 0;
+        for (int i = 0; i < TOY_AUDIO_STEAL_CROSSFADE; ++i) {
+            int pos = voice->current_pos + i;
+            if (i < remaining) {
+                float c = (voice->snapshot_data1[pos] + voice->snapshot_data2[pos]) *
+                          0.5f * voice->volume_scale;
+                voice->steal_tail_l[i] = c * voice->l_gain;
+                voice->steal_tail_r[i] = c * voice->r_gain;
+            } else {
+                voice->steal_tail_l[i] = 0.0f;
+                voice->steal_tail_r[i] = 0.0f;
+            }
+        }
+        voice->steal_fade_pos = 0;
+    } else {
+        voice->steal_fade_pos = TOY_AUDIO_STEAL_CROSSFADE;
+    }
 
     if (voice->snapshot_capacity >= pair->length) {
         memcpy(voice->snapshot_data1, pair->data1,

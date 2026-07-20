@@ -1069,8 +1069,6 @@ static bool init_audio(bool start_muted) {
 }
 
 void play_bounce_sound(int volume, float pan) {
-    audio_lock();  
-
     float size_scale = fmaxf(audio_state.current_size_scale, 0.05f);
 
     if (audio_state.bounce.dirty) {
@@ -1079,6 +1077,11 @@ void play_bounce_sound(int volume, float pan) {
                                        toy_style());
         audio_state.current_size_scale = size_scale;
     }
+
+    /* Synthesis can take considerably longer than an audio callback budget.
+     * The sample pair is separate from active voice snapshots, so it is safe
+     * to generate it before taking the mixer lock. */
+    audio_lock();
 
     float size_factor = 0.7f + 0.3f * fminf(size_scale, 1.0f);
 
@@ -3108,6 +3111,15 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
         return;
     }
     if (st->ball_cleared) {
+        return;
+    }
+    if (st->ghost_mode) {
+        /* The Ghost badge is rendered from frame texture 0.  Clearing the
+         * ball frames during shutdown would make the badge disintegrate. */
+        st->ball_cleared = true;
+        st->shutdown_pending = true;
+        st->shutdown_start_ticks = poingo_ticks_ms();
+        st->shutdown_last_check_ticks = st->shutdown_start_ticks;
         return;
     }
     if (st->color_regen_mode == BALL_REGEN_CLEAR && st->color_regen_active) {
@@ -5479,7 +5491,7 @@ static int run_freerange_wayland(bool start_muted) {
                                          st.gl_hud_w + 4, st.gl_hud_h + 4 };
                     freerange_rect_union(&cur_rect, &hr);
                 }
-                if (st.ghost_mode && !st.ball_cleared) {
+                if (st.ghost_mode && (!st.ball_cleared || st.shutdown_pending)) {
                     FreerangeRect br = { st.width - GHOST_ICON_SIZE - GHOST_ICON_MARGIN, GHOST_ICON_MARGIN, GHOST_ICON_SIZE, GHOST_ICON_SIZE };
                     freerange_rect_union(&cur_rect, &br);
                 }
@@ -5513,7 +5525,7 @@ static int run_freerange_wayland(bool start_muted) {
                 freerange_gl_draw_hud(&st);
             }
 
-            if (st.ghost_mode && !st.ball_cleared) {
+            if (st.ghost_mode && (!st.ball_cleared || st.shutdown_pending)) {
                 float bg_size = (float)GHOST_ICON_SIZE;
                 float bx = (float)st.width - bg_size - (float)GHOST_ICON_MARGIN;
                 float by = (float)GHOST_ICON_MARGIN;
