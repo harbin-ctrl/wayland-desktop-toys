@@ -6,7 +6,10 @@
 #include <stdint.h>
 
 #define TOY_AUDIO_SAMPLE_RATE 48000
-#define TOY_AUDIO_MAX_VOICES 16
+/* Keep the mixer bounded and preallocated, but leave enough headroom for
+ * dense bursts of short effects.  Voices are still recycled when this pool
+ * is exhausted; no audio-thread allocations are performed. */
+#define TOY_AUDIO_MAX_VOICES 32
 
 #define TOY_AUDIO_VOLUME_MIN 0.0f
 #define TOY_AUDIO_VOLUME_MAX 1.5f
@@ -19,6 +22,7 @@
 #define TOY_AUDIO_QUIET_SECONDS 0.25f
 
 #define TOY_AUDIO_LAYER_DETUNE 0.891f
+#define TOY_AUDIO_STEAL_CROSSFADE 96
 
 typedef enum {
     TOY_BOUNCE_POINGO = 0,     
@@ -41,6 +45,9 @@ typedef struct {
     float *snapshot_data2;
     int snapshot_length;
     int snapshot_capacity;  
+    float steal_tail_l[TOY_AUDIO_STEAL_CROSSFADE];
+    float steal_tail_r[TOY_AUDIO_STEAL_CROSSFADE];
+    int steal_fade_pos;
 } ToyVoice;
 
 typedef struct {

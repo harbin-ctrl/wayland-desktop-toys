@@ -152,7 +152,8 @@ xdg-decoration-unstable-v1-client-protocol.h:
 xdg-decoration-unstable-v1-protocol.c:
 	wayland-scanner private-code $(WAYLAND_PROTOCOLS_DIR)/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml $@
 
-src/poingo.o: xdg-shell-client-protocol.h xdg-decoration-unstable-v1-client-protocol.h
+src/poingo.o: xdg-shell-client-protocol.h xdg-decoration-unstable-v1-client-protocol.h \
+	$(TOYAUDIO_DIR)/toy_audio.h
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
