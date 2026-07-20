@@ -1,0 +1,14 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+
+WarningsAsErrors: ''
+
+# Apply checks to all project files (C only here)
+HeaderFilterRegex: '.*'
+
+# Don't auto-format; keep existing style
+FormatStyle: none

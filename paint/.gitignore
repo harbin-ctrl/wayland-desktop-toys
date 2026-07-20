@@ -1,0 +1,8 @@
+bin/
+*.o
+icon_*.png
+xdg-shell-client-protocol.h
+xdg-shell-protocol.c
+test_canvas.png
+test_splat.png
+test_cursor_*.png

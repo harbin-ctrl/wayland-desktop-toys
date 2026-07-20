@@ -1,0 +1,12 @@
+*.o
+/balloons
+
+/balloon_assets.h
+
+/assets/.thunder_work/
+/thunder_pcm.h
+/xdg-*.h
+/xdg-*.c
+/assets/*.apng
+/assets/icon*.png
+/assets/icon.png

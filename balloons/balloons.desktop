@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Balloons
+Comment=Balloons floating on your desktop
+Exec=balloons
+Icon=balloons
+Terminal=false
+Categories=DesktopToy;
