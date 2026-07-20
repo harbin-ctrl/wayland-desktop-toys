@@ -698,8 +698,9 @@ static void splat_shade_region(PaintState *st, int rx0, int ry0, int rx1, int ry
 
         k.c = c;
         if (!box_mixed && c == box_color) {
-            memcpy(dist_c, dist_u, sizeof(float) * (size_t)bw * (size_t)bh);
+            k.dist_c = dist_u;
         } else {
+            k.dist_c = dist_c;
             run_rows(shade_seed_color_pass, &k, bh);
             chamfer_sweep(dist_c, bw, bh);
         }
