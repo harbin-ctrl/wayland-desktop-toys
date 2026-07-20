@@ -104,7 +104,7 @@ GHOSTICON_LIB := $(GHOSTICON_DIR)/libghosticon.a
 LODEPNG_DIR := $(CURDIR)/../third_party/lodepng
 LODEPNG_LIB := $(LODEPNG_DIR)/liblodepng.a
 COMMON  := xdg-shell-protocol.o xdg-decoration-protocol.o
-OBJS    := balloons.o balloon_gen.o audio.o $(COMMON)
+OBJS    := balloons.o balloon_gen.o thunder_synth.o audio.o $(COMMON)
 
 PREFIX := /usr/local
 BINDIR := $(PREFIX)/bin
@@ -123,6 +123,9 @@ balloon_gen.o: balloon_gen.c balloon_gen.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 audio.o: audio.c audio.h $(TOYAUDIO_DIR)/toy_audio.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+thunder_synth.o: thunder_synth.c thunder_synth.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # The ring menu and audio core live in their own library checkouts;

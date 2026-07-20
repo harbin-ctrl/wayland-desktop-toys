@@ -80,9 +80,10 @@ and on high-latency outputs like Bluetooth it keeps the wind and the
 whoosh landing together.
 
 Thunder is procedural too: four deterministic, seeded variations are generated
-at startup from layered low-passed noise, irregular strike envelopes, and slow
-rumble modulation. The strike's distance sets how long the thunder lags the
-flash and how soft it lands.
+at startup from overlapping slow swells, independently filtered low-frequency
+noise bands, broad resonances, gentle diffusion, and soft saturation. The
+strike's distance sets how long the thunder lags the flash and how soft it
+lands.
 
 Output goes through [cubeb](https://github.com/mozilla/cubeb) (mono float
 48 kHz), which also provides that latency measurement; on Fedora the
