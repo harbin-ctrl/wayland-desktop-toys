@@ -27,8 +27,8 @@ make          # builds ./bin/poingo
 
 Development packages: `wayland-client`, `wayland-egl`, `egl`, `glesv2`,
 `xkbcommon`, and `cubeb` (audio; without it the toy builds and runs silent).
-`./build.sh` checks the dependencies and builds Poingo without modifying the
-host. The project-wide package checklist is in `../list.todo`.
+Build and install through the Makefile targets. The project-wide package
+checklist is in `../list.todo`.
 
 ## Options
 ```
