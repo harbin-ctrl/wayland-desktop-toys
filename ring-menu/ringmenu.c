@@ -432,7 +432,7 @@ RingMenu *ringmenu_create(const RingMenuItem *items, int count) {
         } else {
             const char *src = items[i].label ? items[i].label : "";
             int len = 0;
-            while (src[len] && len < RINGMENU_LABEL_MAX) {
+            while (len < RINGMENU_LABEL_MAX && src[len]) {
                 m->items[i].label[len] = src[len];
                 len++;
             }

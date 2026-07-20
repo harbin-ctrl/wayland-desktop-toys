@@ -301,7 +301,7 @@ static void draw_pop(uint8_t *pixels, uint8_t *high, int variant) {
     const float outline_width = 2.5f * scale;
     const Color fill = {255, 255, 230}, white = {255, 255, 255};
     const Color dot = {255, 255, 240}, edge = {0, 0, 0};
-    Point burst[14];
+    Point burst[14] = {0};
     int points = (5 + (int)(next_random(&state) % 3)) * 2;
     for (int i = 0; i < points; i++) {
         float angle = i * 2.0f * (float)M_PI / points + random_range(&state, -.15f, .15f);

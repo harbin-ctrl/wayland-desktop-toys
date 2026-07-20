@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := all
 
-CC     := gcc
+CC     ?= gcc
 CFLAGS := -O3 -ffast-math -Wall -pthread $(shell pkg-config --cflags wayland-client wayland-egl egl glesv2)
 LIBS   := $(shell pkg-config --libs wayland-client wayland-egl egl glesv2) -lm -pthread
 

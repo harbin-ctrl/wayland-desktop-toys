@@ -21,4 +21,5 @@ emscripten-cache/
 
 /*.txt
 !/8-points.txt
+compile_commands.json
 /*.sh

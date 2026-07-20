@@ -87,7 +87,7 @@ static void buf_append(Buf *b, const void *src, size_t n) {
         b->data = realloc(b->data, b->cap);
         if (!b->data) { fprintf(stderr, "out of memory\n"); exit(1); }
     }
-    memcpy(b->data + b->len, src, n);
+    if (n) memcpy(b->data + b->len, src, n);
     b->len += n;
 }
 
@@ -149,6 +149,7 @@ static uint8_t *decode_frame_png(const uint8_t *ihdr_data,
 
 static void blend_region(uint8_t *canvas, int cw, int ch,
                          const uint8_t *src, const PendingFrame *pf) {
+    if (!canvas || !src || !pf || cw <= 0 || ch <= 0) return;
     for (uint32_t row = 0; row < pf->h; row++) {
         uint32_t cy = pf->y + row;
         if ((int)cy >= ch) break;
@@ -180,10 +181,12 @@ static void blend_region(uint8_t *canvas, int cw, int ch,
 }
 
 static void clear_region(uint8_t *canvas, int cw, int ch, const PendingFrame *pf) {
+    if (!canvas || !pf || cw <= 0 || ch <= 0) return;
     for (uint32_t row = 0; row < pf->h; row++) {
         uint32_t cy = pf->y + row;
         if ((int)cy >= ch) break;
         uint32_t cx = pf->x;
+        if (cx >= (uint32_t)cw) continue;
         uint32_t wpix = pf->w;
         if ((int)(cx + wpix) > cw) wpix = (uint32_t)cw - cx;
         memset(canvas + (cy * (uint32_t)cw + cx) * 4, 0, (size_t)wpix * 4);

@@ -566,7 +566,7 @@ static void *synth_thread_main(void *arg) {
         g_whoosh_job.valid = false;
         pthread_mutex_unlock(&g_synth_queue_lock);
 
-        struct timespec t0, t1;
+        struct timespec t0 = {0}, t1 = {0};
         if (g_synth_trace) clock_gettime(CLOCK_MONOTONIC, &t0);
 
         int length = (int)((job.duration + WHOOSH_TAIL_SECONDS) * SAMPLE_RATE);

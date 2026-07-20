@@ -1,4 +1,4 @@
-CC := gcc
+CC ?= gcc
 BIN_DIR := bin
 TARGETS := $(BIN_DIR)/poingo $(BIN_DIR)/icon_maker
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
