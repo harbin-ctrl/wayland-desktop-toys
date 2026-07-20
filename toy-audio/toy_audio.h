@@ -39,6 +39,8 @@ typedef struct {
 typedef struct {
     int current_pos;
     bool playing;
+    bool preparing;
+    uint32_t generation;
     float volume_scale;
     float l_gain, r_gain;   
     float *snapshot_data1;
@@ -49,6 +51,11 @@ typedef struct {
     float steal_tail_r[TOY_AUDIO_STEAL_CROSSFADE];
     int steal_fade_pos;
 } ToyVoice;
+
+typedef struct {
+    int voice_index;
+    uint32_t generation;
+} ToyVoiceClaim;
 
 typedef struct {
     ToyVoice voices[TOY_AUDIO_MAX_VOICES];
@@ -69,6 +76,20 @@ bool toy_mixer_reserve(ToyMixer *m, int max_samples);
 void toy_mixer_render(ToyMixer *m, float *out, int nsamples, bool suppress);
 
 void toy_mixer_render_stereo(ToyMixer *m, float *out, int nframes, bool suppress);
+
+/*
+ * Two-phase voice start.  Claim and commit/cancel must run under the toy's
+ * mixer lock.  Copy deliberately runs without that lock; a preparing voice is
+ * owned exclusively by its claim and is skipped by the renderer.
+ */
+bool toy_mixer_claim_voice(ToyMixer *m, int sample_length,
+                           ToyVoiceClaim *claim);
+bool toy_mixer_copy_claimed_voice(ToyMixer *m, ToyVoiceClaim claim,
+                                  const ToySamplePair *pair);
+bool toy_mixer_commit_voice(ToyMixer *m, ToyVoiceClaim claim,
+                            int sample_length, float volume_scale,
+                            float l_gain, float r_gain);
+void toy_mixer_cancel_voice(ToyMixer *m, ToyVoiceClaim claim);
 
 void toy_mixer_start_voice(ToyMixer *m, const ToySamplePair *pair,
                            float volume_scale);

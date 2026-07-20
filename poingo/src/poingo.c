@@ -1078,11 +1078,6 @@ void play_bounce_sound(int volume, float pan) {
         audio_state.current_size_scale = size_scale;
     }
 
-    /* Synthesis can take considerably longer than an audio callback budget.
-     * The sample pair is separate from active voice snapshots, so it is safe
-     * to generate it before taking the mixer lock. */
-    audio_lock();
-
     float size_factor = 0.7f + 0.3f * fminf(size_scale, 1.0f);
 
     float velocity_factor = fminf(volume / 32.0f, 1.0f);
@@ -1095,10 +1090,26 @@ void play_bounce_sound(int volume, float pan) {
     float l_gain, r_gain;
     toy_audio_equal_power_pan(pan_shaped, &l_gain, &r_gain);
 
-    toy_mixer_start_voice_panned(&g_mixer, &audio_state.bounce,
-                                 size_factor * velocity_factor,
-                                 l_gain, r_gain);
+    /*
+     * Reserve ownership under the mixer lock, copy into the preallocated
+     * snapshot without that lock, then publish the completed voice quickly.
+     */
+    ToyVoiceClaim claim;
+    audio_lock();
+    bool claimed = toy_mixer_claim_voice(
+        &g_mixer, audio_state.bounce.length, &claim);
+    audio_unlock();
+    if (!claimed) return;
 
+    bool copied = toy_mixer_copy_claimed_voice(
+        &g_mixer, claim, &audio_state.bounce);
+    audio_lock();
+    if (!copied ||
+        !toy_mixer_commit_voice(
+            &g_mixer, claim, audio_state.bounce.length,
+            size_factor * velocity_factor, l_gain, r_gain)) {
+        toy_mixer_cancel_voice(&g_mixer, claim);
+    }
     audio_unlock();
 }
 
