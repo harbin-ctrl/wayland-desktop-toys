@@ -1084,8 +1084,10 @@ static void draw_splat(PaintState *st, int cx, int cy, int size, uint8_t color_i
         count++;
     }
 
-    double fx0 = 1e18, fy0 = 1e18, fx1 = -1e18, fy1 = -1e18;
-    for (int i = 0; i < count; i++) {
+    double first_r = BALL_SUPPORT * mr[0];
+    double fx0 = mx[0] - first_r, fy0 = my[0] - first_r;
+    double fx1 = mx[0] + first_r, fy1 = my[0] + first_r;
+    for (int i = 1; i < count; i++) {
         double R = BALL_SUPPORT * mr[i];
         if (mx[i] - R < fx0) fx0 = mx[i] - R;
         if (my[i] - R < fy0) fy0 = my[i] - R;

@@ -1,4 +1,4 @@
-CC := gcc
+CC ?= gcc
 BIN_DIR := bin
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
 TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
