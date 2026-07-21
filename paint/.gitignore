@@ -1,4 +1,6 @@
-bin/
+paint
+icon_maker
+test_engine
 *.o
 icon_*.png
 xdg-shell-client-protocol.h

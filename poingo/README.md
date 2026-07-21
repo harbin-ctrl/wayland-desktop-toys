@@ -21,8 +21,8 @@ audio paths.
 Poingo requires a Wayland compositor. Run:
 
 ```sh
-make          # builds ./bin/poingo
-./bin/poingo  # bounce
+make          # builds ./poingo
+./poingo      # bounce
 ```
 
 Development packages: `wayland-client`, `wayland-egl`, `egl`, `glesv2`,

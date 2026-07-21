@@ -1,6 +1,5 @@
 CC ?= gcc
-BIN_DIR := bin
-TARGETS := $(BIN_DIR)/poingo $(BIN_DIR)/icon_maker
+TARGETS := poingo icon_maker
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
 DESKTOP_TOYS_DIR ?= $(CURDIR)/../desktop-toys-packaging
 RINGMENU_LIB := $(RINGMENU_DIR)/libringmenu.a
@@ -9,7 +8,7 @@ TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
 GHOSTICON_DIR := $(CURDIR)/../shared
 GHOSTICON_LIB := $(GHOSTICON_DIR)/libghosticon.a
 LODEPNG_LIB := $(CURDIR)/../third_party/lodepng/liblodepng.a
-POINGO_SRC := src/poingo.c xdg-shell-protocol.c xdg-decoration-unstable-v1-protocol.c
+POINGO_SRC := poingo.c xdg-shell-protocol.c xdg-decoration-unstable-v1-protocol.c
 ICON_SRC := icon_maker.c
 ICON_SIZES := 32 48 64 128 192 256 512 1024
 ICON_BMPS := $(addprefix icon_,$(addsuffix .bmp,$(ICON_SIZES)))
@@ -32,15 +31,13 @@ CFLAGS := -std=c11 -Wall -Wextra -Wshadow -pedantic -D_GNU_SOURCE -D_DEFAULT_SOU
           -I$(CURDIR) -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(TOY_AUDIO_PIPEWIRE_CFLAGS)
 LDFLAGS := $(WAYLAND_LIBS) $(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
-.PHONY: all clean run debug icons poingo icon_maker install uninstall install-user uninstall-user
+.PHONY: all clean run debug icons install uninstall install-user uninstall-user
 
 all: $(TARGETS)
 
-poingo: $(BIN_DIR)/poingo
-
 # lodepng decodes the Pi logo for the cursor's etched blade (and still
 # serves icon_maker as before).
-$(BIN_DIR)/poingo: $(POINGO_SRC:.c=.o) $(LODEPNG_LIB) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) | $(BIN_DIR)
+poingo: $(POINGO_SRC:.c=.o) $(LODEPNG_LIB) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # The ring menu and audio core live in their own library checkouts;
@@ -53,27 +50,25 @@ $(GHOSTICON_LIB): FORCE
 	$(MAKE) -C $(GHOSTICON_DIR)
 FORCE:
 
-icon_maker: $(BIN_DIR)/icon_maker
-
 icon_maker.o: CFLAGS := -std=c99 -O2 -I$(CURDIR) -I$(CURDIR)/../third_party/lodepng
 LODEPNG_LIB := $(CURDIR)/../third_party/lodepng/liblodepng.a
 $(LODEPNG_LIB): FORCE
 	$(MAKE) -C $(CURDIR)/../third_party/lodepng
-$(BIN_DIR)/icon_maker: icon_maker.o $(LODEPNG_LIB) | $(BIN_DIR)
+icon_maker: icon_maker.o $(LODEPNG_LIB)
 	$(CC) -O2 $^ -o $@ -lm
 
 icons: icon_maker
-	$(BIN_DIR)/icon_maker
+	./icon_maker
 
 debug: CFLAGS += -O0 -g
 debug: all
 
-run: $(BIN_DIR)/poingo
-	./$(BIN_DIR)/poingo
+run: poingo
+	./poingo
 
-install: $(BIN_DIR)/poingo $(BIN_DIR)/icon_maker icons desktop-toys-install
+install: poingo icon_maker icons desktop-toys-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"
-	install -m 755 $(BIN_DIR)/poingo "$(DESTDIR)$(PREFIX)/bin/poingo"
+	install -m 755 poingo "$(DESTDIR)$(PREFIX)/bin/poingo"
 	install -d "$(DESTDIR)$(PREFIX)/share/applications"
 	install -m 644 poingo.desktop "$(DESTDIR)$(PREFIX)/share/applications/poingo.desktop"
 	install -d "$(DESTDIR)$(PREFIX)/share/icons/hicolor"
@@ -84,9 +79,9 @@ install: $(BIN_DIR)/poingo $(BIN_DIR)/icon_maker icons desktop-toys-install
 	update-desktop-database "$(DESTDIR)$(PREFIX)/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(DESTDIR)$(PREFIX)/share/icons/hicolor" 2>/dev/null || true
 
-install-user: $(BIN_DIR)/poingo $(BIN_DIR)/icon_maker icons desktop-toys-install-user
+install-user: poingo icon_maker icons desktop-toys-install-user
 	install -d "$(HOME)/.local/bin"
-	install -m 755 $(BIN_DIR)/poingo "$(HOME)/.local/bin/poingo"
+	install -m 755 poingo "$(HOME)/.local/bin/poingo"
 	install -d "$(HOME)/.local/share/applications"
 	install -m 644 poingo.desktop "$(HOME)/.local/share/applications/poingo.desktop"
 	install -d "$(HOME)/.local/share/icons/hicolor"
@@ -129,11 +124,8 @@ xdg-decoration-unstable-v1-client-protocol.h:
 xdg-decoration-unstable-v1-protocol.c:
 	wayland-scanner private-code $(WAYLAND_PROTOCOLS_DIR)/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml $@
 
-src/poingo.o: xdg-shell-client-protocol.h xdg-decoration-unstable-v1-client-protocol.h \
+poingo.o: xdg-shell-client-protocol.h xdg-decoration-unstable-v1-client-protocol.h \
 	$(TOYAUDIO_DIR)/toy_audio.h $(TOYAUDIO_DIR)/toy_audio_stream.h
-
-$(BIN_DIR):
-	mkdir -p $(BIN_DIR)
 
 clean:
 	$(RM) $(TARGETS) $(POINGO_SRC:.c=.o) $(ICON_SRC:.c=.o) $(LODEPNG_LIB) $(ICON_BMPS) $(ICON_PNGS)

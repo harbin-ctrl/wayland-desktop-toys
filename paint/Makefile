@@ -1,16 +1,15 @@
 CC ?= gcc
-BIN_DIR := bin
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
 TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
 DESKTOP_TOYS_DIR ?= $(CURDIR)/../desktop-toys-packaging
 RINGMENU_LIB := $(RINGMENU_DIR)/libringmenu.a
 TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
-PAINT_SRC := src/paint.c xdg-shell-protocol.c
+PAINT_SRC := paint.c xdg-shell-protocol.c
 ICON_SRC := icon_maker.c
 GHOSTICON_DIR := $(CURDIR)/../shared
 GHOSTICON_LIB := $(GHOSTICON_DIR)/libghosticon.a
 LODEPNG_LIB := $(CURDIR)/../third_party/lodepng/liblodepng.a
-TARGETS := $(BIN_DIR)/paint $(BIN_DIR)/icon_maker
+TARGETS := paint icon_maker
 
 ICON_SIZES := 32 48 64 128 192 256 512 1024
 ICON_PNGS := $(addprefix icon_,$(addsuffix .png,$(ICON_SIZES)))
@@ -36,11 +35,9 @@ CFLAGS := -std=c11 -Wall -Wextra -Wshadow -pedantic -D_GNU_SOURCE -D_DEFAULT_SOU
           -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(TOY_AUDIO_PIPEWIRE_CFLAGS)
 LDFLAGS := $(WAYLAND_LIBS) $(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
-.PHONY: all clean run icons paint icon_maker install install-user test
+.PHONY: all clean run icons install install-user test
 
 all: $(TARGETS)
-
-paint: $(BIN_DIR)/paint
 
 # Wayland protocol glue is generated, not checked in.
 WAYLAND_PROTOCOLS_DIR := $(shell $(PKG_CONFIG) --variable=pkgdatadir wayland-protocols 2>/dev/null || echo /usr/share/wayland-protocols)
@@ -52,7 +49,7 @@ xdg-shell-client-protocol.h:
 xdg-shell-protocol.c:
 	$(WAYLAND_SCANNER) private-code $(WAYLAND_PROTOCOLS_DIR)/stable/xdg-shell/xdg-shell.xml $@
 
-src/paint.o: xdg-shell-client-protocol.h $(RINGMENU_DIR)/ringmenu.h \
+paint.o: xdg-shell-client-protocol.h $(RINGMENU_DIR)/ringmenu.h \
 		$(TOYAUDIO_DIR)/toy_audio.h $(TOYAUDIO_DIR)/toy_audio_stream.h \
 		$(GHOSTICON_DIR)/ghost_icon.h
 
@@ -66,32 +63,30 @@ $(GHOSTICON_LIB): FORCE
 	$(MAKE) -C $(GHOSTICON_DIR)
 FORCE:
 
-$(BIN_DIR)/paint: $(PAINT_SRC:.c=.o) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) $(LODEPNG_LIB) | $(BIN_DIR)
+paint: $(PAINT_SRC:.c=.o) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) $(LODEPNG_LIB)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
-
-icon_maker: $(BIN_DIR)/icon_maker
 
 icon_maker.o: CFLAGS := -std=c99 -O2 -I$(CURDIR) -I$(CURDIR)/../third_party/lodepng
 $(LODEPNG_LIB): FORCE
 	$(MAKE) -C $(CURDIR)/../third_party/lodepng
-$(BIN_DIR)/icon_maker: icon_maker.o $(LODEPNG_LIB) | $(BIN_DIR)
+icon_maker: icon_maker.o $(LODEPNG_LIB)
 	$(CC) -O2 $^ -o $@ -lm
 
 icons: icon_maker
-	$(BIN_DIR)/icon_maker
+	./icon_maker
 
-run: $(BIN_DIR)/paint
-	./$(BIN_DIR)/paint
+run: paint
+	./paint
 
-# Offscreen engine test: includes src/paint.c directly and writes PNGs of a
+# Offscreen engine test: includes paint.c directly and writes PNGs of a
 # simulated session (spray, mixing, drips, eraser, cursor art) plus checks.
-test: $(BIN_DIR)/test_engine
-	cd $(CURDIR) && ./$(BIN_DIR)/test_engine
+test: test_engine
+	cd $(CURDIR) && ./test_engine
 
-$(BIN_DIR)/test_engine: test_engine.c src/paint.c spraycan.h \
+test_engine: test_engine.c paint.c spraycan.h \
 		xdg-shell-client-protocol.h $(RINGMENU_LIB) \
 		xdg-shell-protocol.o $(LODEPNG_LIB) $(TOYAUDIO_LIB) \
-		$(GHOSTICON_LIB) | $(BIN_DIR)
+		$(GHOSTICON_LIB)
 	$(CC) -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE -I$(CURDIR) -I$(RINGMENU_DIR) \
 		-I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng \
 		$(TOY_AUDIO_PIPEWIRE_CFLAGS) test_engine.c \
@@ -99,9 +94,9 @@ $(BIN_DIR)/test_engine: test_engine.c src/paint.c spraycan.h \
 		$(TOYAUDIO_LIB) $(GHOSTICON_LIB) -o $@ $(WAYLAND_LIBS) \
 		$(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
-install: $(BIN_DIR)/paint icons desktop-toys-install
+install: paint icons desktop-toys-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"
-	install -m 755 $(BIN_DIR)/paint "$(DESTDIR)$(PREFIX)/bin/paint"
+	install -m 755 paint "$(DESTDIR)$(PREFIX)/bin/paint"
 	install -d "$(DESTDIR)$(PREFIX)/share/applications"
 	install -m 644 paint.desktop "$(DESTDIR)$(PREFIX)/share/applications/paint.desktop"
 	install -d "$(DESTDIR)$(PREFIX)/share/icons/hicolor"
@@ -112,9 +107,9 @@ install: $(BIN_DIR)/paint icons desktop-toys-install
 	update-desktop-database "$(DESTDIR)$(PREFIX)/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(DESTDIR)$(PREFIX)/share/icons/hicolor" 2>/dev/null || true
 
-install-user: $(BIN_DIR)/paint icons desktop-toys-install-user
+install-user: paint icons desktop-toys-install-user
 	install -d "$(HOME)/.local/bin"
-	install -m 755 $(BIN_DIR)/paint "$(HOME)/.local/bin/paint"
+	install -m 755 paint "$(HOME)/.local/bin/paint"
 	install -d "$(HOME)/.local/share/applications"
 	install -m 644 paint.desktop "$(HOME)/.local/share/applications/paint.desktop"
 	install -d "$(HOME)/.local/share/icons/hicolor"
@@ -126,12 +121,8 @@ install-user: $(BIN_DIR)/paint icons desktop-toys-install-user
 	test -f "$(HOME)/.local/share/icons/hicolor/index.theme" || cp /usr/share/icons/hicolor/index.theme "$(HOME)/.local/share/icons/hicolor/" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(HOME)/.local/share/icons/hicolor" 2>/dev/null || true
 
-$(BIN_DIR):
-	mkdir -p $(BIN_DIR)
-
-
 clean:
-	$(RM) $(TARGETS) $(BIN_DIR)/test_engine $(PAINT_SRC:.c=.o) icon_maker.o test_engine.o $(LODEPNG_LIB) $(ICON_PNGS)
+	$(RM) $(TARGETS) test_engine $(PAINT_SRC:.c=.o) icon_maker.o test_engine.o $(LODEPNG_LIB) $(ICON_PNGS)
 	$(RM) xdg-shell-client-protocol.h xdg-shell-protocol.c
 	$(RM) test_*.png
 %.o: %.c

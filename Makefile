@@ -14,8 +14,8 @@ LINT_SOURCES := \
 	toy-audio/toy_audio.c \
 	ring-menu/ringmenu.c \
 	shared/ghost_icon.c \
-	paint/src/paint.c \
-	poingo/src/poingo.c \
+	paint/paint.c \
+	poingo/poingo.c \
 	balloons/balloon_gen.c balloons/thunder_synth.c balloons/audio.c balloons/balloons.c
 LINT_INCLUDES := -Itoy-audio -Iring-menu -Ishared -Ipaint -Ipoingo -Iballoons -Ithird_party/lodepng
 TIDY_SOURCES := $(addprefix $(CURDIR)/,$(LINT_SOURCES))
