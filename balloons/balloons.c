@@ -755,7 +755,7 @@ static void breeze_update(float dt) {
     g_wind += (g_wind_target - g_wind) * fminf(1.f, dt * 1.6f);
 }
 
-#define BALLOON_SCALE_MIN 0.769f
+#define BALLOON_SCALE_MIN 0.833333f
 #define BALLOON_SCALE_MAX 1.0f
 
 #define BALLOON_TIE_X (36.0f / 72.0f)
