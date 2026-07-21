@@ -55,7 +55,7 @@ checkouts `~/ring-menu` (the circular menu) and
 `~/desktop-toys-packaging` (the Desktop Toys menu category); override with
 `RINGMENU_DIR=` / `DESKTOP_TOYS_DIR=`.
 
-    make            # bin/paint + the paintbrush icons
+    make            # paint + the paintbrush icons
     make run
     make test       # offscreen engine test: sprays, splats, layering,
                     # erasing, cursors — writes PNGs and checks the models

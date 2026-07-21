@@ -1,6 +1,6 @@
 
 #define main paint_main
-#include "src/paint.c"
+#include "paint.c"
 #undef main
 
 #include "lodepng.h"

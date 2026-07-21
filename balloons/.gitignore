@@ -1,5 +1,6 @@
 *.o
 /balloons
+/icon_maker
 
 /balloon_assets.h
 

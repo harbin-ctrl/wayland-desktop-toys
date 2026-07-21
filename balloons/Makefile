@@ -5,7 +5,6 @@ CFLAGS := -O3 -ffast-math -Wall -pthread $(shell pkg-config --cflags wayland-cli
 LIBS   := $(shell pkg-config --libs wayland-client wayland-egl egl glesv2) -lm -pthread
 
 TARGET  := balloons
-BIN_DIR := bin
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
 RINGMENU_LIB := $(RINGMENU_DIR)/libringmenu.a
 TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
@@ -78,7 +77,7 @@ xdg-decoration-protocol.c:
 
 clean:
 	$(RM) $(TARGET) $(OBJS)
-	$(RM) xdg-*.h xdg-*.c $(BIN_DIR)/icon_maker icon_maker.o balloon_assets.h thunder_pcm.h
+	$(RM) xdg-*.h xdg-*.c icon_maker icon_maker.o balloon_assets.h thunder_pcm.h
 	$(RM) assets/*.apng assets/icon*.png assets/icon.png
 	$(RM) assets/.apngs_generated assets/.pops_generated
 
@@ -91,14 +90,11 @@ include $(DESKTOP_TOYS_DIR)/install.mk
 # System install: binary plus the desktop entry, Desktop Toys menu and
 # every icon size — the same set the user install ships, like splat.
 icon_maker.o: CFLAGS := -O3 -Wall -I$(CURDIR)/../third_party/lodepng
-$(BIN_DIR)/icon_maker: icon_maker.o $(LODEPNG_LIB) | $(BIN_DIR)
+icon_maker: icon_maker.o $(LODEPNG_LIB)
 	$(CC) -o $@ $^ -lm
 
-$(BIN_DIR):
-	mkdir -p $@
-
-icons: $(BIN_DIR)/icon_maker
-	$(BIN_DIR)/icon_maker assets
+icons: icon_maker
+	./icon_maker assets
 
 install: $(TARGET) icons desktop-toys-install
 	install -Dm755 $(TARGET) "$(DESTDIR)$(BINDIR)/$(TARGET)"
