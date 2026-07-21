@@ -3,7 +3,7 @@
 Plays APNG balloons floating up on the desktop: no window, no border, transparent
 wherever the APNG is transparent, and click-through everywhere except the
 sprites themselves. 30 big balloons in eight colors drift up the desktop, each
-inflated to its own random size (a ~30% spread) so no two look stamped.
+inflated to its own random size (a ~20% spread) so no two look stamped.
 
 Occasionally a breeze picks up and blows the flotilla left or right for a few seconds;
 balloons blown off one side wrap in from the other, and each balloon answers
