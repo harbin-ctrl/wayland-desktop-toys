@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Cursor Hand Grab, from SVG Repo:
-  https://www.svgrepo.com/svg/372329/cursor-hand-grab
-  License: CC0 1.0 Universal Public Domain Dedication.
+  Cursor Hand Grab, from VMware Clarity Icons:
+  https://github.com/vmware-archive/clarity-assets
+  Icon: cursor-hand-grab-line
+  Copyright (c) 2018 VMware, Inc.
+  Licensed under the MIT License; see THIRD_PARTY_LICENSES.txt.
 -->
 <svg fill="#000000" width="800px" height="800px" viewBox="0 0 36 36"
      version="1.1" preserveAspectRatio="xMidYMid meet"
