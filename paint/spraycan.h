@@ -51,7 +51,7 @@ static inline double spraycan_rrect_(double t, double s,
 #define SPRAYCAN_BODY_T0 33.0
 #define SPRAYCAN_BODY_T1 84.0
 #define SPRAYCAN_DROP_TIP 40.0   // teardrop decal: pointed end (toward cap)
-#define SPRAYCAN_DROP_BASE 70.0  // center of its round bottom end
+#define SPRAYCAN_DROP_BASE 51.0  // compact decal leaves breathing room for the Pi stamp
 #define SPRAYCAN_DROP_R 8.0
 
 static inline double spraycan_cap_hw_(double t) {
