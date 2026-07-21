@@ -9,12 +9,36 @@
 #include <sys/types.h>
 
 #include <pipewire/pipewire.h>
+#include <pipewire/core.h>
+#include <pipewire/keys.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/utils/result.h>
 
 #define TOY_AUDIO_STREAM_NAME_MAX 64
 #define TOY_AUDIO_STREAM_DESCRIPTION_MAX 128
 #define TOY_AUDIO_NSEC_PER_SEC 1000000000ULL
+#define TOY_AUDIO_START_TIMEOUT_SEC 5
+#define TOY_AUDIO_GRAPH_PORTS_MAX 32
+#define TOY_AUDIO_GRAPH_LINKS_MAX 16
+
+typedef struct {
+    uint32_t id;
+    uint32_t node_id;
+    char channel[16];
+    char name[64];
+    bool input;
+    bool present;
+} ToyAudioGraphPort;
+
+typedef struct {
+    uint32_t id;
+    uint32_t output_node;
+    uint32_t output_port;
+    uint32_t input_node;
+    uint32_t input_port;
+    bool present;
+    bool reported;
+} ToyAudioGraphLink;
 
 struct ToyAudioStream {
     struct pw_thread_loop *loop;
@@ -28,7 +52,13 @@ struct ToyAudioStream {
     bool pipewire_initialized;
     atomic_bool streaming;
     atomic_bool format_valid;
+    atomic_bool startup_failed;
     atomic_uint_fast64_t latency_ns;
+    struct pw_registry *registry;
+    struct spa_hook registry_listener;
+    uint32_t stream_node_id;
+    ToyAudioGraphPort graph_ports[TOY_AUDIO_GRAPH_PORTS_MAX];
+    ToyAudioGraphLink graph_links[TOY_AUDIO_GRAPH_LINKS_MAX];
 };
 
 static bool stream_format_matches(const ToyAudioStream *audio,
@@ -45,6 +75,193 @@ static bool stream_format_matches(const ToyAudioStream *audio,
     return info->position[0] == SPA_AUDIO_CHANNEL_FL &&
            info->position[1] == SPA_AUDIO_CHANNEL_FR;
 }
+
+static const char *channel_name(uint32_t channel) {
+    switch (channel) {
+    case SPA_AUDIO_CHANNEL_MONO: return "MONO";
+    case SPA_AUDIO_CHANNEL_FL: return "FL";
+    case SPA_AUDIO_CHANNEL_FR: return "FR";
+    case SPA_AUDIO_CHANNEL_FC: return "FC";
+    case SPA_AUDIO_CHANNEL_LFE: return "LFE";
+    case SPA_AUDIO_CHANNEL_RL: return "RL";
+    case SPA_AUDIO_CHANNEL_RR: return "RR";
+    case SPA_AUDIO_CHANNEL_SL: return "SL";
+    case SPA_AUDIO_CHANNEL_SR: return "SR";
+    default: return "UNKNOWN";
+    }
+}
+
+static void report_format(const ToyAudioStream *audio,
+                          const struct spa_audio_info_raw *info,
+                          bool valid) {
+    uint32_t first = info ? info->position[0] : 0;
+    uint32_t second = info && info->channels > 1 ? info->position[1] : 0;
+    fprintf(stderr,
+            "%s: PipeWire negotiated %s format=%u rate=%u channels=%u "
+            "positions=[%s%s%s]\n",
+            audio->name, valid ? "audio" : "unexpected audio",
+            info ? info->format : 0, info ? info->rate : 0,
+            info ? info->channels : 0, info ? channel_name(first) : "none",
+            info && info->channels > 1 ? "," : "",
+            info && info->channels > 1 ? channel_name(second) : "");
+}
+
+static void signal_startup_change(ToyAudioStream *audio) {
+    if (audio && audio->loop) {
+        pw_thread_loop_signal(audio->loop, false);
+    }
+}
+
+static uint32_t property_id(const struct spa_dict *props, const char *key) {
+    const char *value = props ? spa_dict_lookup(props, key) : NULL;
+    if (!value || !*value) {
+        return PW_ID_ANY;
+    }
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    return end && *end == '\0' && parsed <= UINT32_MAX
+               ? (uint32_t)parsed
+               : PW_ID_ANY;
+}
+
+static void copy_property(char *destination, size_t size,
+                          const struct spa_dict *props, const char *key) {
+    const char *value = props ? spa_dict_lookup(props, key) : NULL;
+    snprintf(destination, size, "%s", value ? value : "?");
+}
+
+static ToyAudioGraphPort *find_graph_port(ToyAudioStream *audio, uint32_t id) {
+    for (size_t i = 0; i < TOY_AUDIO_GRAPH_PORTS_MAX; ++i) {
+        if (audio->graph_ports[i].present && audio->graph_ports[i].id == id) {
+            return &audio->graph_ports[i];
+        }
+    }
+    return NULL;
+}
+
+static ToyAudioGraphLink *find_graph_link(ToyAudioStream *audio, uint32_t id) {
+    for (size_t i = 0; i < TOY_AUDIO_GRAPH_LINKS_MAX; ++i) {
+        if (audio->graph_links[i].present && audio->graph_links[i].id == id) {
+            return &audio->graph_links[i];
+        }
+    }
+    return NULL;
+}
+
+static void audit_graph(ToyAudioStream *audio) {
+    for (size_t i = 0; i < TOY_AUDIO_GRAPH_LINKS_MAX; ++i) {
+        ToyAudioGraphLink *link = &audio->graph_links[i];
+        if (!link->present || link->reported ||
+            link->output_node != audio->stream_node_id) {
+            continue;
+        }
+        ToyAudioGraphPort *source = find_graph_port(audio, link->output_port);
+        ToyAudioGraphPort *destination = find_graph_port(audio, link->input_port);
+        if (!source || !destination) {
+            continue;
+        }
+        fprintf(stderr,
+                "%s: PipeWire route %s/%s -> %s/%s (%s -> %s)\n",
+                audio->name, source->name, source->channel,
+                destination->name, destination->channel,
+                source->input ? "input" : "output",
+                destination->input ? "input" : "output");
+        bool mono_upmix = audio->channels == 1 &&
+                          strcmp(source->channel, "MONO") == 0 &&
+                          (strcmp(destination->channel, "FL") == 0 ||
+                           strcmp(destination->channel, "FR") == 0);
+        if (!mono_upmix && strcmp(source->channel, destination->channel) != 0) {
+            fprintf(stderr,
+                    "%s: ERROR: PipeWire changed channel route %s -> %s\n",
+                    audio->name, source->channel, destination->channel);
+            atomic_store_explicit(&audio->startup_failed, true,
+                                  memory_order_release);
+        }
+        link->reported = true;
+        signal_startup_change(audio);
+    }
+}
+
+static void graph_global(void *userdata, uint32_t id, uint32_t permissions,
+                         const char *type, uint32_t version,
+                         const struct spa_dict *props) {
+    ToyAudioStream *audio = userdata;
+    (void)permissions;
+    (void)version;
+    if (!audio || !type || !props) {
+        return;
+    }
+    if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
+        ToyAudioGraphPort *port = find_graph_port(audio, id);
+        if (!port) {
+            for (size_t i = 0; i < TOY_AUDIO_GRAPH_PORTS_MAX; ++i) {
+                if (!audio->graph_ports[i].present) {
+                    port = &audio->graph_ports[i];
+                    break;
+                }
+            }
+        }
+        if (!port) {
+            fprintf(stderr, "%s: PipeWire graph port table is full\n",
+                    audio->name);
+            return;
+        }
+        port->id = id;
+        port->node_id = property_id(props, PW_KEY_NODE_ID);
+        copy_property(port->channel, sizeof(port->channel), props,
+                      PW_KEY_AUDIO_CHANNEL);
+        copy_property(port->name, sizeof(port->name), props,
+                      PW_KEY_PORT_NAME);
+        const char *direction = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
+        port->input = direction && strcmp(direction, "in") == 0;
+        port->present = true;
+    } else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
+        ToyAudioGraphLink *link = find_graph_link(audio, id);
+        if (!link) {
+            for (size_t i = 0; i < TOY_AUDIO_GRAPH_LINKS_MAX; ++i) {
+                if (!audio->graph_links[i].present) {
+                    link = &audio->graph_links[i];
+                    break;
+                }
+            }
+        }
+        if (!link) {
+            fprintf(stderr, "%s: PipeWire graph link table is full\n",
+                    audio->name);
+            return;
+        }
+        link->id = id;
+        link->output_node = property_id(props, "link.output.node");
+        link->output_port = property_id(props, "link.output.port");
+        link->input_node = property_id(props, "link.input.node");
+        link->input_port = property_id(props, "link.input.port");
+        link->reported = false;
+        link->present = true;
+    }
+    audit_graph(audio);
+}
+
+static void graph_global_remove(void *userdata, uint32_t id) {
+    ToyAudioStream *audio = userdata;
+    if (!audio) {
+        return;
+    }
+    ToyAudioGraphPort *port = find_graph_port(audio, id);
+    if (port) {
+        port->present = false;
+        return;
+    }
+    ToyAudioGraphLink *link = find_graph_link(audio, id);
+    if (link) {
+        link->present = false;
+    }
+}
+
+static const struct pw_registry_events registry_events = {
+    PW_VERSION_REGISTRY_EVENTS,
+    .global = graph_global,
+    .global_remove = graph_global_remove,
+};
 
 static void publish_latency(ToyAudioStream *audio) {
     struct pw_time time_info;
@@ -140,6 +357,11 @@ static void stream_param_changed(void *userdata, uint32_t id,
     if (!param) {
         atomic_store_explicit(&audio->format_valid, false,
                               memory_order_release);
+        atomic_store_explicit(&audio->startup_failed, true,
+                              memory_order_release);
+        fprintf(stderr, "%s: PipeWire removed the negotiated audio format\n",
+                audio->name);
+        signal_startup_change(audio);
         return;
     }
 
@@ -149,11 +371,12 @@ static void stream_param_changed(void *userdata, uint32_t id,
         stream_format_matches(audio, &info);
     atomic_store_explicit(&audio->format_valid, valid,
                           memory_order_release);
+    report_format(audio, &info, valid);
     if (!valid) {
-        fprintf(stderr,
-                "%s: PipeWire negotiated an unexpected audio format\n",
-                audio->name);
+        atomic_store_explicit(&audio->startup_failed, true,
+                              memory_order_release);
     }
+    signal_startup_change(audio);
 }
 
 static void stream_state_changed(void *userdata,
@@ -168,10 +391,17 @@ static void stream_state_changed(void *userdata,
     atomic_store_explicit(&audio->streaming,
                           state == PW_STREAM_STATE_STREAMING,
                           memory_order_release);
+    if (state == PW_STREAM_STATE_STREAMING && audio->stream) {
+        audio->stream_node_id = pw_stream_get_node_id(audio->stream);
+        audit_graph(audio);
+    }
     if (state == PW_STREAM_STATE_ERROR) {
         fprintf(stderr, "%s: PipeWire stream error: %s\n",
                 audio->name, error ? error : "unknown error");
+        atomic_store_explicit(&audio->startup_failed, true,
+                              memory_order_release);
     }
+    signal_startup_change(audio);
 }
 
 static const struct pw_stream_events stream_events = {
@@ -192,6 +422,11 @@ static void destroy_stream(ToyAudioStream *audio) {
         pw_stream_destroy(audio->stream);
         audio->stream = NULL;
     }
+    if (audio->registry) {
+        spa_hook_remove(&audio->registry_listener);
+        pw_proxy_destroy((struct pw_proxy *)audio->registry);
+        audio->registry = NULL;
+    }
     if (audio->loop) {
         pw_thread_loop_destroy(audio->loop);
         audio->loop = NULL;
@@ -203,6 +438,8 @@ static void destroy_stream(ToyAudioStream *audio) {
     atomic_store_explicit(&audio->streaming, false,
                           memory_order_release);
     atomic_store_explicit(&audio->format_valid, false,
+                          memory_order_release);
+    atomic_store_explicit(&audio->startup_failed, false,
                           memory_order_release);
     atomic_store_explicit(&audio->latency_ns, 0,
                           memory_order_release);
@@ -229,6 +466,7 @@ ToyAudioStream *toy_audio_stream_start(
              config->description ? config->description : config->name);
     atomic_init(&audio->streaming, false);
     atomic_init(&audio->format_valid, false);
+    atomic_init(&audio->startup_failed, false);
     atomic_init(&audio->latency_ns, 0);
 
     pw_init(NULL, NULL);
@@ -309,10 +547,46 @@ ToyAudioStream *toy_audio_stream_start(
         return NULL;
     }
 
+    audio->stream_node_id = pw_stream_get_node_id(audio->stream);
+    audio->registry = pw_core_get_registry(
+        pw_stream_get_core(audio->stream), PW_VERSION_REGISTRY, 0);
+    if (!audio->registry ||
+        pw_registry_add_listener(audio->registry, &audio->registry_listener,
+                                 &registry_events, audio) < 0) {
+        fprintf(stderr, "%s: failed to inspect PipeWire audio graph\n",
+                audio->name);
+        toy_audio_stream_stop(audio);
+        return NULL;
+    }
+
     result = pw_thread_loop_start(audio->loop);
     if (result < 0) {
         fprintf(stderr, "%s: failed to start PipeWire audio loop: %s\n",
                 audio->name, spa_strerror(result));
+        toy_audio_stream_stop(audio);
+        return NULL;
+    }
+
+    pw_thread_loop_lock(audio->loop);
+    while (!atomic_load_explicit(&audio->startup_failed,
+                                 memory_order_acquire) &&
+           !toy_audio_stream_is_ready(audio)) {
+        if (pw_thread_loop_timed_wait(audio->loop,
+                                      TOY_AUDIO_START_TIMEOUT_SEC) < 0) {
+            fprintf(stderr, "%s: timed out waiting for valid PipeWire audio\n",
+                    audio->name);
+            atomic_store_explicit(&audio->startup_failed, true,
+                                  memory_order_release);
+            break;
+        }
+    }
+    bool ready = toy_audio_stream_is_ready(audio);
+    bool failed = atomic_load_explicit(&audio->startup_failed,
+                                       memory_order_acquire);
+    pw_thread_loop_unlock(audio->loop);
+    if (!ready || failed) {
+        fprintf(stderr, "%s: refusing to run with an invalid audio format\n",
+                audio->name);
         toy_audio_stream_stop(audio);
         return NULL;
     }
