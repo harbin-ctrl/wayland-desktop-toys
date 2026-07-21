@@ -66,7 +66,7 @@ $(GHOSTICON_LIB): FORCE
 	$(MAKE) -C $(GHOSTICON_DIR)
 FORCE:
 
-$(BIN_DIR)/paint: $(PAINT_SRC:.c=.o) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) | $(BIN_DIR)
+$(BIN_DIR)/paint: $(PAINT_SRC:.c=.o) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) $(LODEPNG_LIB) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 icon_maker: $(BIN_DIR)/icon_maker

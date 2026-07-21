@@ -26,6 +26,7 @@
 #include "ghost_icon.h"
 #include "audio.h"
 #include "ringmenu.h"
+#include "cursor_hand_grab_png.h"
 
 #define BALLOON_SOUND_SCALE 0.45f
 #define POP_SOUND_VOLUME 32   /* full whack (0-64 scale, typical 8-32) */
@@ -383,6 +384,7 @@ static __attribute__((unused)) bool anim_load_mem(const char *path, const uint8_
 
 
 typedef enum { MODE_BOUNCE, MODE_FLOAT, MODE_SCURRY, MODE_DRIFT } Mode;
+typedef enum { INTERACTION_GRAB, INTERACTION_POP } InteractionMode;
 
 typedef struct {
     const Anim *anim;
@@ -938,6 +940,11 @@ typedef struct {
     struct wl_buffer *cursor_buffer;
     void *cursor_map;
     size_t cursor_map_size;
+    struct wl_surface *hand_cursor_surface;
+    struct wl_buffer *hand_cursor_buffer;
+    void *hand_cursor_map;
+    size_t hand_cursor_map_size;
+    uint32_t cursor_serial;
 } Ctx;
 
 static volatile sig_atomic_t g_signal_quit = 0;
@@ -1005,6 +1012,7 @@ static float g_scale = 1.0f;
 static float g_speed = 1.0f;
 static float g_time = 0.0f;
 static int g_grab_index = -1;
+static InteractionMode g_interaction_mode = INTERACTION_GRAB;
 static double g_press_x, g_press_y;
 static struct timespec g_press_ts;
 
@@ -1072,7 +1080,9 @@ static GLuint g_menu_tex;
 static uint32_t *g_menu_scratch;
 static bool g_menu_was_open;   
 
-enum { MENU_STORM = 1, MENU_POP_ALL, MENU_GHOST, MENU_QUIT };
+enum { MENU_STORM = 1, MENU_GRAB, MENU_POP, MENU_POP_ALL, MENU_GHOST, MENU_QUIT };
+
+static void update_pointer_cursor(uint32_t serial);
 
 static void menu_result(int r) {
     if (r == MENU_STORM) {
@@ -1081,6 +1091,14 @@ static void menu_result(int r) {
         } else {
             start_storm();
         }
+    }
+    else if (r == MENU_GRAB || r == MENU_POP) {
+        if (g_grab_index >= 0) {
+            g_sprites[g_grab_index].grabbed = false;
+            g_grab_index = -1;
+        }
+        g_interaction_mode = r == MENU_GRAB ? INTERACTION_GRAB : INTERACTION_POP;
+        update_pointer_cursor(g_ctx->cursor_serial);
     }
     else if (r == MENU_POP_ALL) start_mass_pop(false);
     else if (r == MENU_GHOST) g_ghost = true;
@@ -1175,44 +1193,108 @@ static void render_needle_cursor(uint32_t *px, int size) {
     }
 }
 
-static bool create_needle_cursor(Ctx *ctx) {
+static void render_hand_cursor(uint32_t *px, int size) {
+    memset(px, 0, (size_t)size * size * sizeof(*px));
+    unsigned char *rgba = NULL;
+    unsigned width = 0, height = 0;
+    if (lodepng_decode32(&rgba, &width, &height,
+                         balloons_cursor_hand_grab_png,
+                         balloons_cursor_hand_grab_png_len) != 0 ||
+        width != (unsigned)size || height != (unsigned)size) {
+        free(rgba);
+        return;
+    }
+    for (unsigned y = 0; y < height; ++y) {
+        for (unsigned x = 0; x < width; ++x) {
+            const unsigned char *src = rgba + ((size_t)y * width + x) * 4;
+            px[(size_t)y * size + x] = ((uint32_t)src[3] << 24) |
+                                       ((uint32_t)src[0] << 16) |
+                                       ((uint32_t)src[1] << 8) |
+                                       src[2];
+        }
+    }
+    free(rgba);
+}
+
+typedef void (*CursorRenderer)(uint32_t *pixels, int size);
+
+static bool create_cursor_surface(Ctx *ctx, const char *name,
+                                   CursorRenderer render,
+                                   struct wl_surface **surface_out,
+                                   struct wl_buffer **buffer_out,
+                                   void **map_out, size_t *map_size_out) {
     if (!ctx->shm || !ctx->compositor) return false;
 
     int stride = NEEDLE_SIZE * 4;
     size_t bytes = (size_t)stride * NEEDLE_SIZE;
-    int fd = memfd_create("balloons-cursor", MFD_CLOEXEC);
+    int fd = memfd_create(name, MFD_CLOEXEC);
     if (fd < 0) return false;
     if (ftruncate(fd, (off_t)bytes) < 0) { close(fd); return false; }
     void *data = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (data == MAP_FAILED) { close(fd); return false; }
 
     struct wl_shm_pool *pool = wl_shm_create_pool(ctx->shm, fd, (int32_t)bytes);
-    ctx->cursor_buffer = wl_shm_pool_create_buffer(pool, 0, NEEDLE_SIZE, NEEDLE_SIZE,
-                                                   stride, WL_SHM_FORMAT_ARGB8888);
+    struct wl_buffer *buffer = wl_shm_pool_create_buffer(
+        pool, 0, NEEDLE_SIZE, NEEDLE_SIZE, stride, WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool);
     close(fd);
 
-    render_needle_cursor(data, NEEDLE_SIZE);
-    ctx->cursor_map = data;
-    ctx->cursor_map_size = bytes;
+    if (!buffer) {
+        munmap(data, bytes);
+        return false;
+    }
+    render(data, NEEDLE_SIZE);
 
-    ctx->cursor_surface = wl_compositor_create_surface(ctx->compositor);
-    if (!ctx->cursor_surface) return false;
-    wl_surface_attach(ctx->cursor_surface, ctx->cursor_buffer, 0, 0);
-    wl_surface_damage(ctx->cursor_surface, 0, 0, NEEDLE_SIZE, NEEDLE_SIZE);
-    wl_surface_commit(ctx->cursor_surface);
+    struct wl_surface *surface = wl_compositor_create_surface(ctx->compositor);
+    if (!surface) {
+        wl_buffer_destroy(buffer);
+        munmap(data, bytes);
+        return false;
+    }
+    wl_surface_attach(surface, buffer, 0, 0);
+    wl_surface_damage(surface, 0, 0, NEEDLE_SIZE, NEEDLE_SIZE);
+    wl_surface_commit(surface);
+    *surface_out = surface;
+    *buffer_out = buffer;
+    *map_out = data;
+    *map_size_out = bytes;
     return true;
+}
+
+static bool create_needle_cursor(Ctx *ctx) {
+    return create_cursor_surface(ctx, "balloons-needle-cursor",
+                                 render_needle_cursor, &ctx->cursor_surface,
+                                 &ctx->cursor_buffer, &ctx->cursor_map,
+                                 &ctx->cursor_map_size);
+}
+
+static bool create_hand_cursor(Ctx *ctx) {
+    return create_cursor_surface(ctx, "balloons-hand-cursor",
+                                 render_hand_cursor, &ctx->hand_cursor_surface,
+                                 &ctx->hand_cursor_buffer, &ctx->hand_cursor_map,
+                                 &ctx->hand_cursor_map_size);
+}
+
+static void update_pointer_cursor(uint32_t serial) {
+    if (!g_ctx || !g_ctx->pointer || !serial) return;
+    struct wl_surface *surface = g_interaction_mode == INTERACTION_GRAB
+                                     ? g_ctx->hand_cursor_surface
+                                     : g_ctx->cursor_surface;
+    if (surface) {
+        int hot_x = g_interaction_mode == INTERACTION_GRAB ? 9 : (int)NEEDLE_TIP;
+        int hot_y = g_interaction_mode == INTERACTION_GRAB ? 7 : (int)NEEDLE_TIP;
+        wl_pointer_set_cursor(g_ctx->pointer, serial, surface, hot_x, hot_y);
+    }
 }
 
 static void pointer_enter(void *d, struct wl_pointer *p, uint32_t serial,
                           struct wl_surface *sf, wl_fixed_t x, wl_fixed_t y) {
     (void)d; (void)sf;
+    g_ctx->cursor_serial = serial;
     g_ctx->ptr_x = wl_fixed_to_double(x);
     g_ctx->ptr_y = wl_fixed_to_double(y);
-    if (g_ctx->cursor_surface) {
-        wl_pointer_set_cursor(p, serial, g_ctx->cursor_surface,
-                              (int)NEEDLE_TIP, (int)NEEDLE_TIP);
-    }
+    (void)p;
+    update_pointer_cursor(serial);
     if (g_trace) fprintf(stderr, "[trace] enter %.0f,%.0f\n", g_ctx->ptr_x, g_ctx->ptr_y);
 }
 static void pointer_leave(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *sf) {
@@ -1220,13 +1302,8 @@ static void pointer_leave(void *d, struct wl_pointer *p, uint32_t serial, struct
 }
 static void grabbed_follow_pointer(void) {
     Sprite *s = &g_sprites[g_grab_index];
-    float w = sprite_w(s, g_scale), h = sprite_h(s, g_scale);
     s->x = (float)g_ctx->ptr_x - s->grab_dx;
     s->y = (float)g_ctx->ptr_y - s->grab_dy;
-    if (s->x < 0) s->x = 0;
-    if (s->x + w > g_ctx->width) s->x = g_ctx->width - w;
-    if (s->y < 0) s->y = 0;
-    if (s->y + h > g_ctx->height) s->y = g_ctx->height - h;
 }
 static void pointer_motion(void *d, struct wl_pointer *p, uint32_t time,
                            wl_fixed_t x, wl_fixed_t y) {
@@ -1241,6 +1318,7 @@ static void pointer_button(void *d, struct wl_pointer *p, uint32_t serial,
                            uint32_t time, uint32_t button, uint32_t state) {
     (void)d; (void)p; (void)serial; (void)time;
     bool pressed = state == WL_POINTER_BUTTON_STATE_PRESSED;
+    g_ctx->cursor_serial = serial;
 
     if (g_ghost) {
         if (pressed) {
@@ -1253,7 +1331,6 @@ static void pointer_button(void *d, struct wl_pointer *p, uint32_t serial,
         int btn = -1;
         if (button == 0x110) btn = RINGMENU_BTN_LEFT;        
         else if (button == 0x111) btn = RINGMENU_BTN_RIGHT;  
-        else if (button == 0x112) btn = RINGMENU_BTN_MIDDLE; 
         if (btn >= 0) {
             int r = ringmenu_button(g_menu, btn, pressed);
             if (r >= 0) menu_result(r);
@@ -1261,7 +1338,12 @@ static void pointer_button(void *d, struct wl_pointer *p, uint32_t serial,
         return;
     }
 
-    if (button == 0x112) { 
+    if (button == 0x112) {
+        /* Middle-click has no action outside the ring menu. */
+        return;
+    }
+
+    if (button == 0x110 && g_interaction_mode == INTERACTION_GRAB) {
         if (pressed) {
             int hit = sprite_hit(g_ctx->ptr_x, g_ctx->ptr_y);
             if (hit >= 0 && !g_sprites[hit].popped) {
@@ -1299,6 +1381,12 @@ static void pointer_button(void *d, struct wl_pointer *p, uint32_t serial,
         if (g_menu) {
             ringmenu_set_led(g_menu, MENU_STORM - 1,
                              g_storm_active ? RINGMENU_LED_ON : RINGMENU_LED_OFF);
+            ringmenu_set_led(g_menu, MENU_GRAB - 1,
+                             g_interaction_mode == INTERACTION_GRAB
+                                 ? RINGMENU_LED_ON : RINGMENU_LED_OFF);
+            ringmenu_set_led(g_menu, MENU_POP - 1,
+                             g_interaction_mode == INTERACTION_POP
+                                 ? RINGMENU_LED_ON : RINGMENU_LED_OFF);
             ringmenu_set_led(g_menu, MENU_GHOST - 1,
                              g_ghost ? RINGMENU_LED_ON : RINGMENU_LED_OFF);
             ringmenu_open(g_menu, (int)g_ctx->ptr_x, (int)g_ctx->ptr_y,
@@ -1306,7 +1394,8 @@ static void pointer_button(void *d, struct wl_pointer *p, uint32_t serial,
         }
         return;
     }
-    if (button != 0x110 || !pressed) return; 
+    if (button != 0x110 || !pressed ||
+        g_interaction_mode != INTERACTION_POP) return;
 
     int hit = sprite_hit(g_ctx->ptr_x, g_ctx->ptr_y);
     if (g_trace) fprintf(stderr, "[trace] press at %.0f,%.0f hit=%d\n",
@@ -1681,13 +1770,15 @@ int main(int argc, char **argv) {
     startup_mark("GL pipeline");
 
     {
-        RingMenuItem items[4] = {
+        RingMenuItem items[6] = {
             { .label = "STORM", .led = RINGMENU_LED_OFF },
+            { .label = "GRAB", .led = RINGMENU_LED_ON },
+            { .label = "POP", .led = RINGMENU_LED_OFF },
             { .label = "POP ALL" },
             { .label = "GHOST", .led = RINGMENU_LED_OFF },
             { .label = "QUIT" },
         };
-        g_menu = ringmenu_create(items, 4);
+        g_menu = ringmenu_create(items, 6);
     if (!g_menu) fprintf(stderr, "balloons: no ring menu\n");
     if (g_menu) {
         int menu_size = ringmenu_size(g_menu);
@@ -1708,6 +1799,9 @@ int main(int argc, char **argv) {
 
     if (!create_needle_cursor(&ctx)) {
         fprintf(stderr, "balloons: no needle cursor, using the default pointer\n");
+    }
+    if (!create_hand_cursor(&ctx)) {
+        fprintf(stderr, "balloons: no hand cursor, using the default pointer\n");
     }
 
     GLuint **anim_tex = calloc((size_t)nfiles, sizeof(GLuint *));
@@ -2191,6 +2285,9 @@ int main(int argc, char **argv) {
     if (ctx.cursor_surface) wl_surface_destroy(ctx.cursor_surface);
     if (ctx.cursor_buffer) wl_buffer_destroy(ctx.cursor_buffer);
     if (ctx.cursor_map) munmap(ctx.cursor_map, ctx.cursor_map_size);
+    if (ctx.hand_cursor_surface) wl_surface_destroy(ctx.hand_cursor_surface);
+    if (ctx.hand_cursor_buffer) wl_buffer_destroy(ctx.hand_cursor_buffer);
+    if (ctx.hand_cursor_map) munmap(ctx.hand_cursor_map, ctx.hand_cursor_map_size);
     eglMakeCurrent(ctx.egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface(ctx.egl_display, ctx.egl_surface);
     wl_egl_window_destroy(ctx.egl_window);

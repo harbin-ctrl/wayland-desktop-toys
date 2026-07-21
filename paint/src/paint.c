@@ -33,6 +33,7 @@ static PFNEGLSWAPBUFFERSWITHDAMAGEEXTPROC g_swap_damage;
 #include "toy_audio.h"
 #include "toy_audio_stream.h"
 #include "spraycan.h"
+#include "lodepng.h"
 
 #ifndef PI
 #define PI 3.14159265358979323846f
@@ -1389,6 +1390,103 @@ static void hiss_stop(void) {
 #define CURSOR_BUF 448
 #define CURSOR_HOT (CURSOR_BUF / 2)
 
+/* Optional monochrome Raspberry Pi mark, loaded from the same system artwork
+ * locations as Poingo's etched cursor.  A missing logo is deliberately a
+ * no-op so Paint remains portable. */
+static struct {
+    uint8_t *m;
+    int w, h;
+    float center_x, center_y;  /* alpha-weighted visual center of the mark */
+} g_pi_logo;
+
+static uint8_t *paint_read_file(const char *path, size_t *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    uint8_t *buf = NULL;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long size = ftell(f);
+        if (size > 0 && fseek(f, 0, SEEK_SET) == 0) {
+            buf = malloc((size_t)size);
+            if (buf && fread(buf, 1, (size_t)size, f) == (size_t)size) {
+                *out_len = (size_t)size;
+            } else {
+                free(buf);
+                buf = NULL;
+            }
+        }
+    }
+    fclose(f);
+    return buf;
+}
+
+static void pi_logo_load(void) {
+    static const char *paths[] = {
+        "/usr/share/piwiz/raspberry-pi-logo.png",
+        "/usr/share/raspberrypi-artwork/raspberry-pi-logo-small.png",
+        "/usr/share/raspberrypi-artwork/raspberry-pi-logo.png",
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        size_t len = 0;
+        uint8_t *buf = paint_read_file(paths[i], &len);
+        if (!buf) continue;
+        uint8_t *rgba = NULL;
+        unsigned w = 0, h = 0;
+        unsigned err = lodepng_decode32(&rgba, &w, &h, buf, len);
+        free(buf);
+        if (err || !rgba || w == 0 || h == 0) continue;
+        uint8_t *mask = malloc((size_t)w * h);
+        if (!mask) { free(rgba); return; }
+        double weight = 0.0, sum_x = 0.0, sum_y = 0.0;
+        for (size_t p = 0; p < (size_t)w * h; p++) {
+            const uint8_t *src = rgba + p * 4;
+            unsigned value = src[0];
+            if (src[1] > value) value = src[1];
+            if (src[2] > value) value = src[2];
+            mask[p] = (uint8_t)((src[3] * (255u - value)) / 255u);
+            weight += mask[p];
+            sum_x += (double)(p % w) * mask[p];
+            sum_y += (double)(p / w) * mask[p];
+        }
+        free(rgba);
+        g_pi_logo.m = mask;
+        g_pi_logo.w = (int)w;
+        g_pi_logo.h = (int)h;
+        g_pi_logo.center_x = weight > 0.0 ? (float)(sum_x / weight)
+                                            : (float)w * 0.5f;
+        g_pi_logo.center_y = weight > 0.0 ? (float)(sum_y / weight)
+                                            : (float)h * 0.5f;
+        return;
+    }
+}
+
+static float pi_logo_sample(float x, float y) {
+    if (!g_pi_logo.m) return 0.0f;
+    x -= 0.5f;
+    y -= 0.5f;
+    int x0 = (int)floorf(x), y0 = (int)floorf(y);
+    float fx = x - x0, fy = y - y0;
+    float result = 0.0f;
+    for (int j = 0; j <= 1; j++) {
+        int yy = y0 + j;
+        if (yy < 0 || yy >= g_pi_logo.h) continue;
+        float wy = j ? fy : 1.0f - fy;
+        for (int i = 0; i <= 1; i++) {
+            int xx = x0 + i;
+            if (xx < 0 || xx >= g_pi_logo.w) continue;
+            float wx = i ? fx : 1.0f - fx;
+            result += wx * wy * (float)g_pi_logo.m[yy * g_pi_logo.w + xx];
+        }
+    }
+    return result / 255.0f;
+}
+
+static void pi_logo_destroy(void) {
+    free(g_pi_logo.m);
+    g_pi_logo.m = NULL;
+    g_pi_logo.w = g_pi_logo.h = 0;
+    g_pi_logo.center_x = g_pi_logo.center_y = 0.0f;
+}
+
 static double clamp01(double v) {
     return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
 }
@@ -1550,6 +1648,23 @@ static void render_brush(uint32_t *px, int stride, int buf_w, int buf_h,
                 fr += (255.0 - fr) * rim;
                 fg += (255.0 - fg) * rim;
                 fb += (255.0 - fb) * rim;
+
+                if (g_pi_logo.m && d_h < 0.0) {
+                    const float logo_h = 9.6f;
+                    const float logo_scale = logo_h / (float)g_pi_logo.h;
+                    const float logo_center_t =
+                        BRUSH_LEN + HANDLE_LEN * (2.0f / 3.0f);
+                    /* Center the visible ink, not the PNG canvas: the
+                     * source logo is asymmetrical within its bounds. */
+                    float mark = pi_logo_sample(
+                        (float)(s / logo_scale + g_pi_logo.center_x),
+                        (float)((t - logo_center_t) / logo_scale +
+                                g_pi_logo.center_y));
+                    double stamp = 0.90 * mark;
+                    fr *= 1.0 - stamp;
+                    fg *= 1.0 - stamp;
+                    fb *= 1.0 - stamp;
+                }
             }
 
             double ot = (d_sel + 1.2) / 0.8;
@@ -1571,6 +1686,26 @@ static void render_brush(uint32_t *px, int stride, int buf_w, int buf_h,
 static double can_scale(const PaintState *st) {
     return 0.62 + 0.90 * (st->spray_radius - SPRAY_R_MIN) /
                         (SPRAY_R_MAX - SPRAY_R_MIN);
+}
+
+static void spraycan_stamp_pi_logo(double t, double s, double k,
+                                   double *r, double *g, double *b) {
+    if (!g_pi_logo.m || !r || !g || !b) return;
+    const float logo_h = 13.0f;
+    const float logo_scale = logo_h / (float)g_pi_logo.h;
+    const float logo_center_t = SPRAYCAN_BODY_T1 - 13.0f;
+    float mark = pi_logo_sample(
+        (float)(s / (k * logo_scale) + g_pi_logo.center_x),
+        (float)((t / k - logo_center_t) / logo_scale +
+                g_pi_logo.center_y));
+    float body = spraycan_rrect_(t / k, s / k,
+                                 SPRAYCAN_BODY_T0, SPRAYCAN_BODY_T1,
+                                 SPRAYCAN_BODY_HW, 2.8);
+    if (body < 0.0) {
+        *r *= 1.0 - mark;
+        *g *= 1.0 - mark;
+        *b *= 1.0 - mark;
+    }
 }
 
 static void render_cursor(PaintState *st, uint32_t *px) {
@@ -1631,6 +1766,7 @@ static void render_cursor(PaintState *st, uint32_t *px) {
                 double r, g, b, a;
                 spraycan_sample(t / k, s / k, pc.r, pc.g, pc.b, 1,
                                 &r, &g, &b, &a);
+                spraycan_stamp_pi_logo(t, s, k, &r, &g, &b);
                 cursor_blend(px, x, y, r, g, b, a);
             }
         }
@@ -1786,6 +1922,7 @@ static void build_badge(PaintState *st) {
                         double s = -rx * SPRAYCAN_AXIS_Y + ry * SPRAYCAN_AXIS_X;
                         double r, g, b, a;
                         spraycan_sample(t / k, s / k, pc.r, pc.g, pc.b, 1, &r, &g, &b, &a);
+                        spraycan_stamp_pi_logo(t, s, k, &r, &g, &b);
                         ar += r * a; ag += g * a; ab += b * a; aa += a;
                     }
                 }
@@ -2783,6 +2920,7 @@ int main(void) {
     }
     update_input_region(&st);
 
+    pi_logo_load();
     if (!create_cursor(&st)) {
         fprintf(stderr, "Warning: could not create the tool cursor, "
                         "using the default pointer\n");
@@ -3008,6 +3146,7 @@ int main(void) {
     if (st.cursor_surface) wl_surface_destroy(st.cursor_surface);
     if (st.cursor_buffer) wl_buffer_destroy(st.cursor_buffer);
     if (st.cursor_map) munmap(st.cursor_map, st.cursor_map_size);
+    pi_logo_destroy();
     if (st.shm) wl_shm_destroy(st.shm);
     if (st.canvas_texture) glDeleteTextures(1, &st.canvas_texture);
     if (st.program) glDeleteProgram(st.program);
