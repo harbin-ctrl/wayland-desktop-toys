@@ -33,7 +33,7 @@ all: $(TARGET)
 $(TARGET): $(OBJS) $(LODEPNG_LIB) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
 	$(CC) -o $@ $(OBJS) $(LODEPNG_LIB) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) $(LIBS)
 
-balloons.o: balloons.c balloon_gen.h audio.h $(RINGMENU_DIR)/ringmenu.h xdg-shell-client-protocol.h xdg-decoration-client-protocol.h $(GHOSTICON_DIR)/ghost_icon.h
+balloons.o: balloons.c balloon_gen.h audio.h cursor_hand_grab_png.h $(RINGMENU_DIR)/ringmenu.h xdg-shell-client-protocol.h xdg-decoration-client-protocol.h $(GHOSTICON_DIR)/ghost_icon.h
 	$(CC) $(CFLAGS) -I$(GHOSTICON_DIR) -c -o $@ $<
 
 balloon_gen.o: balloon_gen.c balloon_gen.h
