@@ -1351,7 +1351,7 @@ static void hiss_render(void *userdata, float *output,
     pthread_mutex_unlock(&h->mu);
 }
 
-static void hiss_start(void) {
+static bool hiss_start(void) {
     toy_hiss_init(&g_hiss.synth);
     ToyAudioStreamConfig stream_config = {
         .name = "paint-hiss",
@@ -1363,11 +1363,11 @@ static void hiss_start(void) {
     };
     g_hiss.stream = toy_audio_stream_start(&stream_config);
     if (!g_hiss.stream) {
-        fprintf(stderr,
-                "Paint: failed to start PipeWire stream; spraying silently.\n");
-        return;
+        fprintf(stderr, "Paint: failed to start PipeWire audio; quitting.\n");
+        return false;
     }
     g_hiss.running = true;
+    return true;
 }
 
 static void hiss_set(bool spraying, float size01) {
@@ -2817,7 +2817,9 @@ int main(void) {
         build_badge(&st);
     }
 
-    hiss_start();
+    if (!hiss_start()) {
+        return 1;
+    }
 
     printf("Paint running. SPLAT: click or drag to throw glossy paint blobs.\n"
            "SPRAY: hold the left button to mist (hold still to build up\n"

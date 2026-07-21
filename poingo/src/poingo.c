@@ -1008,7 +1008,7 @@ static bool init_audio(bool start_muted) {
     g_audio_stream = toy_audio_stream_start(&stream_config);
     if (!g_audio_stream) {
         fprintf(stderr,
-                "poingo: failed to start PipeWire; running silent\n");
+                "poingo: failed to start PipeWire audio; quitting\n");
         shutdown_audio();
         return false;
     }
@@ -4806,7 +4806,13 @@ static int run_freerange_wayland(bool start_muted) {
     }
     if (g_menu) {
         int menu_size = ringmenu_size(g_menu);
-        g_menu_scratch_cap = (size_t)menu_size * menu_size;
+        /* Color-field mode renders a rectangle expanded from the menu's
+         * normal square to include the wheel.  Reserve that larger working
+         * area up front; otherwise the render below changes the quad size
+         * without having room to upload its pixels, stretching the menu. */
+        float field_radius = ringmenu_field_radius(g_menu);
+        int scratch_side = menu_size + (int)ceilf(field_radius * 2.0f);
+        g_menu_scratch_cap = (size_t)scratch_side * scratch_side;
         g_menu_scratch = malloc(g_menu_scratch_cap * 4);
         if (!g_menu_scratch) {
             fprintf(stderr, "Failed to allocate menu workspace\n");
