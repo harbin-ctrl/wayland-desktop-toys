@@ -18,6 +18,5 @@ Right click for the menu.  You can "GHOST" any of them, they will spookily get o
 ```bash
 make -j4            # build all toys
 make install-user   # install locally into ~/.local
-sudo make install   # install system-wide
-make clean
+sudo make install   # OR install system-wide
 ```
