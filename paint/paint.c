@@ -82,11 +82,6 @@ typedef enum {
 #define ERASE_RATE 11.0         // 1/e density decay per sec at eraser center
 #define PAINT_EPS 0.004f        // below this a pixel counts as bare glass
 
-#define DRIP_DENS 6.5
-#define DRIP_TRAIL_DENS 2.4f
-#define MAX_DRIPS 48
-
-
 #define LIGHT_DX 0.7071      // toward the right
 #define LIGHT_DY 0.7071      // toward the bottom
 #define FIELD_ISO 1.0        // metaball field value at the silhouette
@@ -113,16 +108,6 @@ typedef enum {
 #define SPLAT_SIZE_ALLOC_MAX (2.0 * SPLAT_S_MAX)
 #define SPLAT_SCRATCH_SIDE ((int)(2.0 * SPLAT_SIZE_ALLOC_MAX) + 64)
 #define SPLAT_SCRATCH_CAP ((size_t)SPLAT_SCRATCH_SIDE * SPLAT_SCRATCH_SIDE)
-
-typedef struct {
-    float x, y;          
-    float vol, vol0;     
-    float width;         
-    float speed;         
-    float phase;         
-    float r, g, b;       
-} Drip;
-
 
 typedef struct {
     struct wl_display *display;
@@ -233,9 +218,6 @@ typedef struct {
         int x0, y0, x1, y1;
     } damage_hist[DAMAGE_HISTORY];
     int damage_hist_depth;
-
-    Drip drips[MAX_DRIPS];
-    int num_drips;
 
     struct timespec last_step;   
 } PaintState;
@@ -815,8 +797,6 @@ static void deposit_dot(PaintState *st, double cx, double cy, double rad,
     }
 }
 
-static void try_spawn_drip(PaintState *st, int x, int y, float r, float g, float b);
-
 typedef struct {
     PaintState *st;
     double cx, cy;
@@ -897,12 +877,6 @@ static void spray_stamp(PaintState *st, double px, double py, double dt) {
 
     int pad = (int)(1.6 * R) + 8;
     queue_shade(st, (int)px - pad, (int)py - pad, (int)px + pad, (int)py + pad);
-
-    for (int i = 0; i < 3; i++) {
-        double rr = frand() * 0.8 * R;
-        double ang = frand() * 2.0 * PI;
-        try_spawn_drip(st, (int)(px + rr * cos(ang)), (int)(py + rr * sin(ang)), cr, cg, cb);
-    }
 }
 
 typedef struct {
@@ -1230,81 +1204,6 @@ static void splat_at(PaintState *st, int x, int y) {
 }
 
 
-static void try_spawn_drip(PaintState *st, int x, int y, float r, float g, float b) {
-    if (st->num_drips >= MAX_DRIPS) return;
-    if (x < 0 || y < 0 || x >= st->width || y >= st->height) return;
-
-    const float *p = st->paint + ((size_t)y * st->width + x) * 4;
-    double thresh = DRIP_DENS * 1.5 + frand() * 3.0;
-    if (p[0] < thresh) return;
-    if (frand() > 0.05) return;
-
-    for (int i = 0; i < st->num_drips; i++) {
-        if (fabsf(st->drips[i].x - (float)x) < 22.0f &&
-            fabsf(st->drips[i].y - (float)y) < 60.0f) {
-            return;
-        }
-    }
-
-    Drip *d = &st->drips[st->num_drips++];
-    d->x = (float)x;
-    d->y = (float)y;
-    d->vol0 = d->vol = (float)(45.0 + frand() * 110.0);
-    d->width = (float)(2.0 + frand() * 1.5);
-    d->speed = (float)(30.0 + frand() * 40.0);
-    d->phase = (float)(frand() * 2.0 * PI);
-    
-    d->r = r;
-    d->g = g;
-    d->b = b;
-}
-
-static void drips_step(PaintState *st, double dt) {
-    for (int i = 0; i < st->num_drips;) {
-        Drip *d = &st->drips[i];
-        float v = d->speed * (0.35f + 0.65f * d->vol / d->vol0);
-        float travel = (float)(v * dt);
-        if (travel > d->vol) travel = d->vol;
-
-        float sx0 = d->x, sy0 = d->y;
-        float remaining = travel;
-        while (remaining > 0.0f) {
-            float stp = remaining < 1.0f ? remaining : 1.0f;
-            d->y += stp;
-            d->phase += 0.35f * stp;
-            d->x += sinf(d->phase) * 0.10f * stp +
-                    (float)((frand() - 0.5) * 0.2 * stp);
-            float w = d->width;
-            int ix0 = (int)floorf(d->x - w - 1.0f);
-            int ix1 = (int)ceilf(d->x + w + 1.0f);
-            int iy = (int)floorf(d->y);
-            float inv_w2 = 1.0f / (w * w);
-            for (int ix = ix0; ix <= ix1; ix++) {
-                float dxp = (float)ix + 0.5f - d->x;
-                float q = 1.0f - dxp * dxp * inv_w2;
-                if (q <= 0.0f) continue;
-                deposit(st, ix, iy, DRIP_TRAIL_DENS * stp * q,
-                        d->r, d->g, d->b);
-            }
-            remaining -= stp;
-        }
-        d->vol -= travel;
-
-        float pad = d->width + 3.0f;
-        queue_shade(st, (int)(fminf(sx0, d->x) - pad), (int)(sy0 - 2.0f),
-                    (int)(fmaxf(sx0, d->x) + pad),
-                    (int)(d->y + d->width * 1.6f + 3.0f));
-
-        if (d->vol <= 0.0f || d->y > (float)st->height + 4.0f) {
-            deposit_dot(st, d->x, d->y + 0.5, d->width * 1.5, 2.6f,
-                        d->r, d->g, d->b);
-            *d = st->drips[--st->num_drips];
-        } else {
-            i++;
-        }
-    }
-}
-
 static void clear_canvas(PaintState *st) {
     if (!st->canvas || st->width <= 0 || st->height <= 0) return;
     memset(st->canvas, 0, (size_t)st->width * (size_t)st->height * 4);
@@ -1321,7 +1220,6 @@ static void clear_canvas(PaintState *st) {
     }
     st->splat_count = 0;
     st->has_last_splat = false;
-    st->num_drips = 0;
     st->shade_pending = false;   
     mark_dirty(st, 0, 0, st->width, st->height);
 }
@@ -2961,7 +2859,7 @@ int main(void) {
 
     printf("Paint running. SPLAT: click or drag to throw glossy paint blobs.\n"
            "SPRAY: hold the left button to mist (hold still to build up\n"
-           "opacity); lay it on thick and it drips. Scroll to change the tool\n"
+           "opacity). Scroll to change the tool\n"
            "size. Right-click for the menu (drag to a slot and release):\n"
            "colors, SPRAY, SPLAT, ERASER, GHOST, CLEAR, QUIT, CANCEL.\n"
            "Keys: 1-7 colors, T tool, E eraser, [ ] size, C clear,\n"
@@ -2974,7 +2872,7 @@ int main(void) {
         bool spraying = st.pointer_down && st.paint_mode &&
                         !ringmenu_is_open(st.menu) &&
                         (st.eraser_mode || st.tool == TOOL_SPRAY);
-        bool animating = spraying || st.num_drips > 0 || g_quit_fade > 0.0;
+        bool animating = spraying || g_quit_fade > 0.0;
 
         hiss_set(spraying && !st.eraser_mode,
                  (float)((st.spray_radius - SPRAY_R_MIN) /
@@ -3053,7 +2951,6 @@ int main(void) {
                 } else {
                     st.has_last_spray = false;
                 }
-                drips_step(&st, dt);
             }
         }
         st.last_step = now;

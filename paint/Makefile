@@ -79,7 +79,7 @@ run: paint
 	./paint
 
 # Offscreen engine test: includes paint.c directly and writes PNGs of a
-# simulated session (spray, mixing, drips, eraser, cursor art) plus checks.
+# simulated session (spray, mixing, eraser, cursor art) plus checks.
 test: test_engine
 	cd $(CURDIR) && ./test_engine
 

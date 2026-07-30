@@ -98,10 +98,7 @@ int main(void) {
     st.spray_radius = 55;
     for (int i = 0; i < 400; i++) {
         spray_stamp(&st, 690, 130, dt);
-        drips_step(&st, dt);
     }
-    int drips_seen = st.num_drips;
-    for (int i = 0; i < 4000 && st.num_drips > 0; i++) drips_step(&st, dt);
 
     shade_region(&st, 0, 0, st.width - 1, st.height - 1);
     uint32_t quick_px = canvas_at(&st, 130, 140);
@@ -120,11 +117,9 @@ int main(void) {
     printf("quick puff:  density %.2f alpha %u\n", (double)d_quick, quick_a);
     printf("long soak:   density %.2f alpha %u\n", (double)d_soak, soak_a);
     printf("after erase: density %.4f\n", (double)d_erased);
-    printf("drips while spraying: %d\n", drips_seen);
     if (!(quick_a > 20 && quick_a < 200)) { puts("FAIL: quick puff not translucent"); fails++; }
     if (!(soak_a > 230)) { puts("FAIL: soak not near-opaque"); fails++; }
     if (!(d_erased < 0.05f)) { puts("FAIL: eraser left paint behind"); fails++; }
-    if (!(drips_seen > 0)) { puts("FAIL: heavy paint never dripped"); fails++; }
 
     uint32_t mix_px = canvas_at(&st, 425, 250);
     unsigned mr = mix_px & 0xFF, mg = (mix_px >> 8) & 0xFF;

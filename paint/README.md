@@ -10,8 +10,7 @@ desktop, with two tools sharing one canvas:
   paint a few millimeters proud of the glass, glossy where their edges face
   the light, merging when they touch.
 - **SPRAY** — hold the left button to mist translucent paint onto the glass;
-  the longer you hover the more opaque it gets, colors mix in proportion, and
-  really thick paint starts to run.
+  the longer you hover the more opaque it gets, and colors mix in proportion.
 
 ## How the two paints layer
 
