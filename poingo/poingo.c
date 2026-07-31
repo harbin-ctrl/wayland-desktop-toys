@@ -2939,7 +2939,7 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
     if (!st) {
         return;
     }
-    if (st->ball_cleared) {
+    if (st->ball_cleared || st->shutdown_pending) {
         return;
     }
     if (st->ghost_mode) {
@@ -2956,8 +2956,12 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
     }
     /* Fade out rather than running the clear/regen dissolve. The regen is
      * still used for colour changes; it is only the exit that fades, so quit
-     * looks the same as balloons and paint. */
-    st->ball_cleared = true;
+     * looks the same as balloons and paint.
+     *
+     * Deliberately does NOT set ball_cleared: that flag skips
+     * update_ball_physics, which would freeze the ball in mid-air for the
+     * whole half second it is fading. The ball keeps bouncing as it goes.
+     * Re-entry is guarded by shutdown_pending above instead. */
     st->shutdown_pending = true;
     st->exit_fade = POINGO_EXIT_FADE_SECONDS;
     st->shutdown_start_ticks = poingo_ticks_ms();
