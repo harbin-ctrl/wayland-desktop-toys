@@ -20,7 +20,6 @@
 #include "ringmenu.h"
 #include "toy_audio.h"
 #include "toy_audio_stream.h"
-#include "lodepng.h"
 #include <stdatomic.h>
 
 
@@ -183,6 +182,7 @@ static int g_ball_h = 512;
 #define RECENT_BOUNCE_PLAYBACK_COUNT 12
 #define AUDIO_SHUTDOWN_CHECK_MS 100u
 #define AUDIO_SHUTDOWN_MAX_MS 2000u
+#define POINGO_EXIT_FADE_SECONDS 0.5f
 #define AUDIO_PREDICT_SECONDS 2.0f
 #define AUDIO_PREDICT_DELAY_SECONDS 0.015f
 #define AUDIO_PREDICT_HORIZON_MIN_SECONDS 0.25f
@@ -2202,6 +2202,9 @@ typedef struct {
     int             regen_thread_count;
     int             regen_units_uploaded;
     bool shutdown_pending;
+    /* Exit fade: seconds remaining of the 0.5s alpha ramp that replaced
+     * the regen/dissolve on quit, matching balloons and paint. */
+    float exit_fade;
     bool ball_cleared;
     uint32_t shutdown_last_check_ticks;
     uint32_t shutdown_start_ticks;
@@ -2686,80 +2689,6 @@ static struct {
     bool ready;
 } g_ball_cursor;
 
-static struct { uint8_t *m; int w, h; } g_etch;
-
-static uint8_t *cursor_read_file(const char *path, size_t *out_len) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    uint8_t *buf = NULL;
-    if (fseek(f, 0, SEEK_END) == 0) {
-        long sz = ftell(f);
-        if (sz > 0 && fseek(f, 0, SEEK_SET) == 0) {
-            buf = malloc((size_t)sz);
-            if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz) {
-                *out_len = (size_t)sz;
-            } else {
-                free(buf);
-                buf = NULL;
-            }
-        }
-    }
-    fclose(f);
-    return buf;
-}
-
-static void etch_mask_load(void) {
-    static const char *paths[] = {
-        "/usr/share/piwiz/raspberry-pi-logo.png",
-        "/usr/share/raspberrypi-artwork/raspberry-pi-logo-small.png",
-        "/usr/share/raspberrypi-artwork/raspberry-pi-logo.png",
-    };
-    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        size_t len = 0;
-        uint8_t *buf = cursor_read_file(paths[i], &len);
-        if (!buf) continue;
-        uint8_t *rgba = NULL;
-        unsigned w = 0, h = 0;
-        unsigned err = lodepng_decode32(&rgba, &w, &h, buf, len);
-        free(buf);
-        if (err || !rgba) continue;
-        uint8_t *m = malloc((size_t)w * h);
-        if (!m) { free(rgba); return; }
-        for (size_t p = 0; p < (size_t)w * h; p++) {
-            const uint8_t *s = rgba + p * 4;
-            unsigned v = s[0];               
-            if (s[1] > v) v = s[1];
-            if (s[2] > v) v = s[2];
-            m[p] = (uint8_t)((s[3] * (255u - v)) / 255u);
-        }
-        free(rgba);
-        g_etch.m = m;
-        g_etch.w = (int)w;
-        g_etch.h = (int)h;
-        return;
-    }
-}
-
-static float etch_sample(float x, float y) {
-    if (!g_etch.m) return 0.0f;
-    x -= 0.5f; y -= 0.5f;
-    int x0 = (int)floorf(x), y0 = (int)floorf(y);
-    float fx = x - x0, fy = y - y0;
-    float acc = 0.0f;
-    for (int j = 0; j <= 1; j++) {
-        int yy = y0 + j;
-        if (yy < 0 || yy >= g_etch.h) continue;
-        float wy = j ? fy : 1.0f - fy;
-        for (int i = 0; i <= 1; i++) {
-            int xx = x0 + i;
-            if (xx < 0 || xx >= g_etch.w) continue;
-            float wx = i ? fx : 1.0f - fx;
-            acc += wx * wy * (float)g_etch.m[yy * g_etch.w + xx];
-        }
-    }
-    return acc / 255.0f;
-}
-
 static void blade_render(void) {
     uint32_t *px = g_ball_cursor.blade;
     if (!px) return;
@@ -2775,12 +2704,6 @@ static void blade_render(void) {
     float il = 1.0f / sqrtf(lx3 * lx3 + ly3 * ly3 + lz3 * lz3);
     lx3 *= il; ly3 *= il; lz3 *= il;
     const float vdotl = s2 * lx3 - s2 * ly3;
-
-    float eh = 30.0f, escale = 1.0f, et0 = 0.0f;
-    if (g_etch.m) {
-        escale = eh / (float)g_etch.h;
-        et0 = 0.45f * len - eh * 0.5f;
-    }
 
     for (int y = 0; y < CURSOR_BUF; y++) {
         for (int x = 0; x < CURSOR_BUF; x++) {
@@ -2806,21 +2729,6 @@ static void blade_render(void) {
             bright *= 1.0f + 0.05f * (1.0f - tt / len);
 
             float r = 214.0f * bright, g = 218.0f * bright, b = 226.0f * bright;
-
-            if (g_etch.m) {
-                float lx = s / escale + (float)g_etch.w * 0.5f;
-                float ly = (t - et0) / escale;
-                float m = etch_sample(lx, ly);
-                const float dpx = 1.1f;
-                float up = etch_sample(lx + 0.243f * dpx, ly - 0.970f * dpx);
-                float dn = etch_sample(lx - 0.243f * dpx, ly + 0.970f * dpx);
-                float relief = up - dn;      
-                float k = 1.0f - 0.16f * m;
-                float lift = 85.0f * relief;
-                r = r * k + lift;
-                g = g * k + lift;
-                b = b * k + lift * 1.04f;
-            }
 
             if (e < STREAK_BORDER) {
                 float ol = (STREAK_BORDER - e) / STREAK_BORDER;
@@ -2950,7 +2858,6 @@ static bool ball_cursor_create(struct wl_shm *shm, struct wl_compositor *composi
 
     g_ball_cursor.blade = malloc((size_t)CURSOR_BUF * CURSOR_BUF * 4);
     if (!g_ball_cursor.blade) return false;
-    etch_mask_load();   
     blade_render();
 
     compute_axis_vectors();
@@ -2993,8 +2900,6 @@ static void ball_cursor_destroy(void) {
     if (g_ball_cursor.map) munmap(g_ball_cursor.map, g_ball_cursor.map_size);
     free(g_ball_cursor.blade);
     memset(&g_ball_cursor, 0, sizeof(g_ball_cursor));
-    free(g_etch.m);
-    memset(&g_etch, 0, sizeof(g_etch));
 }
 
 static void freerange_color_randomize_and_regen(FreedomState *st) {
@@ -3049,7 +2954,14 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
     if (st->color_regen_mode == BALL_REGEN_CLEAR && st->color_regen_active) {
         return;
     }
-    freerange_clear_ball_and_start_regen(st);
+    /* Fade out rather than running the clear/regen dissolve. The regen is
+     * still used for colour changes; it is only the exit that fades, so quit
+     * looks the same as balloons and paint. */
+    st->ball_cleared = true;
+    st->shutdown_pending = true;
+    st->exit_fade = POINGO_EXIT_FADE_SECONDS;
+    st->shutdown_start_ticks = poingo_ticks_ms();
+    st->shutdown_last_check_ticks = st->shutdown_start_ticks;
 }
 
 static void freerange_color_set_and_regen(FreedomState *st,
@@ -3300,7 +3212,12 @@ static void freerange_gl_draw_frame(FreedomState *st, const FreedomFrameSet *fra
     glVertexAttribPointer(st->gl_uv_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), verts + 2);
     glEnableVertexAttribArray(st->gl_pos_loc);
     glEnableVertexAttribArray(st->gl_uv_loc);
-    glUniform1f(st->gl_alpha_loc, st->ghost_mode ? 0.4f : 1.0f);
+    float base_alpha = st->ghost_mode ? 0.4f : 1.0f;
+    if (st->shutdown_pending) {
+        float k = st->exit_fade / POINGO_EXIT_FADE_SECONDS;
+        base_alpha *= k < 0.0f ? 0.0f : (k > 1.0f ? 1.0f : k);
+    }
+    glUniform1f(st->gl_alpha_loc, base_alpha);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
@@ -4886,6 +4803,7 @@ static int run_freerange_wayland(bool start_muted) {
     st.ball_vx = get_natural_vx(st.width);
     st.ball_vx_direction = 1;
     st.shutdown_pending = false;
+    st.exit_fade = 0.0f;
     st.ball_cleared = false;
     st.shutdown_last_check_ticks = 0;
     st.shutdown_start_ticks = 0;
@@ -5195,6 +5113,13 @@ static int run_freerange_wayland(bool start_muted) {
 
         if (st.shutdown_pending) {
             uint32_t now_ticks = poingo_ticks_ms();
+            if (st.exit_fade > 0.0f) {
+                /* Driven from the tick clock rather than the simulation step:
+                 * the fade must finish even if the sim is paused or starved. */
+                float elapsed = (float)(now_ticks - st.shutdown_start_ticks) * 0.001f;
+                st.exit_fade = POINGO_EXIT_FADE_SECONDS - elapsed;
+                if (st.exit_fade <= 0.0f) st.exit_fade = 0.0f;
+            }
             if (now_ticks - st.shutdown_start_ticks >= AUDIO_SHUTDOWN_MAX_MS) {
                 st.running = false;
             }

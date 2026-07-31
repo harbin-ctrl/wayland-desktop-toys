@@ -7,7 +7,6 @@ TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
 TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
 GHOSTICON_DIR := $(CURDIR)/../shared
 GHOSTICON_LIB := $(GHOSTICON_DIR)/libghosticon.a
-LODEPNG_LIB := $(CURDIR)/../third_party/lodepng/liblodepng.a
 POINGO_SRC := poingo.c xdg-shell-protocol.c xdg-decoration-unstable-v1-protocol.c
 ICON_SRC := icon_maker.c
 ICON_SIZES := 32 48 64 128 192 256 512 1024
@@ -28,16 +27,14 @@ WAYLAND_LIBS := -lwayland-client -lwayland-egl -lEGL -lGLESv2 -lxkbcommon
 endif
 
 CFLAGS := -std=c11 -Wall -Wextra -Wshadow -pedantic -D_GNU_SOURCE -D_DEFAULT_SOURCE -O2 -fPIC \
-          -I$(CURDIR) -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(TOY_AUDIO_PIPEWIRE_CFLAGS)
+          -I$(CURDIR) -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) $(WAYLAND_CFLAGS) $(TOY_AUDIO_PIPEWIRE_CFLAGS)
 LDFLAGS := $(WAYLAND_LIBS) $(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
 .PHONY: all clean run debug icons install uninstall install-user uninstall-user
 
 all: $(TARGETS)
 
-# lodepng decodes the Pi logo for the cursor's etched blade (and still
-# serves icon_maker as before).
-poingo: $(POINGO_SRC:.c=.o) $(LODEPNG_LIB) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
+poingo: $(POINGO_SRC:.c=.o) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # The ring menu and audio core live in their own library checkouts;
@@ -50,6 +47,8 @@ $(GHOSTICON_LIB): FORCE
 	$(MAKE) -C $(GHOSTICON_DIR)
 FORCE:
 
+# lodepng survives only for icon_maker, which encodes the .png desktop
+# icons at build time. The toy itself decodes nothing.
 icon_maker.o: CFLAGS := -std=c99 -O2 -I$(CURDIR) -I$(CURDIR)/../third_party/lodepng
 LODEPNG_LIB := $(CURDIR)/../third_party/lodepng/liblodepng.a
 $(LODEPNG_LIB): FORCE

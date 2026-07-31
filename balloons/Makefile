@@ -13,10 +13,13 @@ TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
 include $(TOYAUDIO_DIR)/pipewire.mk
 CFLAGS  += $(TOY_AUDIO_PIPEWIRE_CFLAGS)
 LIBS    += $(TOY_AUDIO_PIPEWIRE_LIBS)
-CFLAGS  += -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(CURDIR)/../third_party/lodepng
+CFLAGS  += -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR)
 GHOSTICON_DIR := $(CURDIR)/../shared
 GHOSTICON_LIB := $(GHOSTICON_DIR)/libghosticon.a
 
+# lodepng is only for icon_maker, which encodes the .png desktop icons.
+# The toy itself decodes nothing: all its graphics are generated, and the
+# grab cursor is compiled in as raw pixels (cursor_hand_grab.h).
 LODEPNG_DIR := $(CURDIR)/../third_party/lodepng
 LODEPNG_LIB := $(LODEPNG_DIR)/liblodepng.a
 COMMON  := xdg-shell-protocol.o xdg-decoration-protocol.o
@@ -29,10 +32,10 @@ BINDIR := $(PREFIX)/bin
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS) $(LODEPNG_LIB) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
-	$(CC) -o $@ $(OBJS) $(LODEPNG_LIB) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) $(LIBS)
+$(TARGET): $(OBJS) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
+	$(CC) -o $@ $(OBJS) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) $(LIBS)
 
-balloons.o: balloons.c balloon_gen.h audio.h cursor_hand_grab_png.h $(RINGMENU_DIR)/ringmenu.h xdg-shell-client-protocol.h xdg-decoration-client-protocol.h $(GHOSTICON_DIR)/ghost_icon.h
+balloons.o: balloons.c balloon_gen.h audio.h cursor_hand_grab.h $(RINGMENU_DIR)/ringmenu.h xdg-shell-client-protocol.h xdg-decoration-client-protocol.h $(GHOSTICON_DIR)/ghost_icon.h
 	$(CC) $(CFLAGS) -I$(GHOSTICON_DIR) -c -o $@ $<
 
 balloon_gen.o: balloon_gen.c balloon_gen.h

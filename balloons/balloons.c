@@ -21,12 +21,11 @@
 
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-client-protocol.h"
-#include "lodepng.h"
 #include "balloon_gen.h"
 #include "ghost_icon.h"
 #include "audio.h"
 #include "ringmenu.h"
-#include "cursor_hand_grab_png.h"
+#include "cursor_hand_grab.h"
 
 #define BALLOON_SOUND_SCALE 0.45f
 #define POP_SOUND_VOLUME 32   /* full whack (0-64 scale, typical 8-32) */
@@ -105,283 +104,6 @@ static bool find_alpha_bounds(const Anim *animation, AlphaBounds *bounds) {
     return true;
 }
 
-static uint32_t be32(const uint8_t *p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-static uint16_t be16(const uint8_t *p) {
-    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
-}
-static void put_be32(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
-}
-
-typedef struct {
-    uint8_t *data;
-    size_t len;
-    size_t cap;
-} Buf;
-
-static void buf_append(Buf *b, const void *src, size_t n) {
-    if (b->len + n > b->cap) {
-        b->cap = (b->cap ? b->cap * 2 : 4096);
-        while (b->cap < b->len + n) b->cap *= 2;
-        b->data = realloc(b->data, b->cap);
-        if (!b->data) { fprintf(stderr, "out of memory\n"); exit(1); }
-    }
-    if (n) memcpy(b->data + b->len, src, n);
-    b->len += n;
-}
-
-static void buf_append_chunk(Buf *b, const char type[4], const uint8_t *data, uint32_t len) {
-    uint8_t hdr[8];
-    put_be32(hdr, len);
-    memcpy(hdr + 4, type, 4);
-    buf_append(b, hdr, 8);
-    if (len) buf_append(b, data, len);
-    uint8_t *crcbuf = malloc(4 + len);
-    if (!crcbuf) { fprintf(stderr, "out of memory\n"); exit(1); }
-    memcpy(crcbuf, type, 4);
-    if (len) memcpy(crcbuf + 4, data, len);
-    uint8_t crc[4];
-    put_be32(crc, lodepng_crc32(crcbuf, 4 + len));
-    free(crcbuf);
-    buf_append(b, crc, 4);
-}
-
-typedef struct {
-    uint32_t w, h, x, y;
-    int delay_ms;
-    uint8_t dispose, blend;
-    Buf idat;          
-    bool has_data;
-} PendingFrame;
-
-static uint8_t *decode_frame_png(const uint8_t *ihdr_data, 
-                                 const Buf *shared_chunks, 
-                                 const PendingFrame *pf) {
-    unsigned out_w, out_h;
-    static const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
-    Buf png = {0};
-    buf_append(&png, sig, 8);
-    uint8_t ihdr[13];
-    memcpy(ihdr, ihdr_data, 13);
-    put_be32(ihdr, pf->w);
-    put_be32(ihdr + 4, pf->h);
-    buf_append_chunk(&png, "IHDR", ihdr, 13);
-    if (shared_chunks->len) buf_append(&png, shared_chunks->data, shared_chunks->len);
-    buf_append_chunk(&png, "IDAT", pf->idat.data, (uint32_t)pf->idat.len);
-    buf_append_chunk(&png, "IEND", NULL, 0);
-
-    uint8_t *rgba = NULL;
-    unsigned err = lodepng_decode32(&rgba, &out_w, &out_h, png.data, png.len);
-    free(png.data);
-    if (err) {
-        fprintf(stderr, "apngo: frame decode failed: %s\n", lodepng_error_text(err));
-        return NULL;
-    }
-    if (out_w != pf->w || out_h != pf->h) {
-        fprintf(stderr, "apngo: frame size mismatch (%ux%u vs %ux%u)\n",
-                out_w, out_h, pf->w, pf->h);
-        free(rgba);
-        return NULL;
-    }
-    return rgba;
-}
-
-static void blend_region(uint8_t *canvas, int cw, int ch,
-                         const uint8_t *src, const PendingFrame *pf) {
-    if (!canvas || !src || !pf || cw <= 0 || ch <= 0) return;
-    for (uint32_t row = 0; row < pf->h; row++) {
-        uint32_t cy = pf->y + row;
-        if ((int)cy >= ch) break;
-        for (uint32_t col = 0; col < pf->w; col++) {
-            uint32_t cx = pf->x + col;
-            if ((int)cx >= cw) break;
-            const uint8_t *s = src + (row * pf->w + col) * 4;
-            uint8_t *d = canvas + (cy * (uint32_t)cw + cx) * 4;
-            if (pf->blend == 0 ) {
-                memcpy(d, s, 4);
-            } else { 
-                uint32_t sa = s[3];
-                if (sa == 255) {
-                    memcpy(d, s, 4);
-                } else if (sa > 0) {
-                    uint32_t da = d[3];
-                    uint32_t oa = sa + da * (255 - sa) / 255;
-                    if (oa > 0) {
-                        for (int c = 0; c < 3; c++) {
-                            uint32_t sc = s[c], dc = d[c];
-                            d[c] = (uint8_t)((sc * sa + dc * da * (255 - sa) / 255) / oa);
-                        }
-                    }
-                    d[3] = (uint8_t)oa;
-                }
-            }
-        }
-    }
-}
-
-static void clear_region(uint8_t *canvas, int cw, int ch, const PendingFrame *pf) {
-    if (!canvas || !pf || cw <= 0 || ch <= 0) return;
-    for (uint32_t row = 0; row < pf->h; row++) {
-        uint32_t cy = pf->y + row;
-        if ((int)cy >= ch) break;
-        uint32_t cx = pf->x;
-        if (cx >= (uint32_t)cw) continue;
-        uint32_t wpix = pf->w;
-        if ((int)(cx + wpix) > cw) wpix = (uint32_t)cw - cx;
-        memset(canvas + (cy * (uint32_t)cw + cx) * 4, 0, (size_t)wpix * 4);
-    }
-}
-
-static void emit_frame(Anim *anim, int *cap, const uint8_t *canvas, int delay_ms) {
-    if (anim->nframes == *cap) {
-        *cap = *cap ? *cap * 2 : 8;
-        anim->frames = realloc(anim->frames, (size_t)*cap * sizeof(AnimFrame));
-        if (!anim->frames) { fprintf(stderr, "out of memory\n"); exit(1); }
-    }
-    size_t npix = (size_t)anim->w * anim->h;
-    uint8_t *pm = malloc(npix * 4);
-    if (!pm) { fprintf(stderr, "out of memory\n"); exit(1); }
-    for (size_t i = 0; i < npix; i++) {
-        const uint8_t *s = canvas + i * 4;
-        uint8_t *d = pm + i * 4;
-        uint32_t a = s[3];
-        d[0] = (uint8_t)(s[0] * a / 255);
-        d[1] = (uint8_t)(s[1] * a / 255);
-        d[2] = (uint8_t)(s[2] * a / 255);
-        d[3] = (uint8_t)a;
-    }
-    anim->frames[anim->nframes].rgba = pm;
-    anim->frames[anim->nframes].delay_ms = delay_ms;
-    anim->nframes++;
-}
-
-static __attribute__((unused)) bool anim_load_mem(const char *path, const uint8_t *file, size_t flen, Anim *anim) {
-    memset(anim, 0, sizeof(*anim));
-    if (flen < 8 + 25) { fprintf(stderr, "balloons: %s: too small\n", path); return false; }
-
-    static const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
-    if (memcmp(file, sig, 8) != 0) {
-        fprintf(stderr, "balloons: %s: not a PNG\n", path);
-        return false;
-    }
-
-    uint8_t ihdr_data[13] = {0};
-    bool have_ihdr = false;
-    bool have_actl = false;
-    bool seen_idat = false;
-    Buf shared = {0};              
-    PendingFrame cur = {0};        
-    bool cur_active = false;
-    bool default_is_frame = false; 
-
-    uint8_t *canvas = NULL, *prev_save = NULL;
-    int cap = 0;
-    bool ok = true;
-
-    size_t pos = 8;
-    while (pos + 12 <= (size_t)flen) {
-        uint32_t len = be32(file + pos);
-        const uint8_t *type = file + pos + 4;
-        const uint8_t *data = file + pos + 8;
-        if (pos + 12 + len > (size_t)flen) break;
-
-        if (!memcmp(type, "IHDR", 4) && len == 13) {
-            memcpy(ihdr_data, data, 13);
-            anim->w = (int)be32(data);
-            anim->h = (int)be32(data + 4);
-            have_ihdr = true;
-            canvas = calloc((size_t)anim->w * anim->h, 4);
-            prev_save = malloc((size_t)anim->w * anim->h * 4);
-            if (!canvas || !prev_save) { fprintf(stderr, "out of memory\n"); exit(1); }
-        } else if (!memcmp(type, "acTL", 4)) {
-            have_actl = true;
-        } else if (!memcmp(type, "fcTL", 4) && len == 26) {
-            if (cur_active && cur.has_data) {
-                uint8_t *rgba = decode_frame_png(ihdr_data, &shared, &cur);
-                if (!rgba) { ok = false; break; }
-                if (cur.dispose == 2) memcpy(prev_save, canvas, (size_t)anim->w * anim->h * 4);
-                blend_region(canvas, anim->w, anim->h, rgba, &cur);
-                free(rgba);
-                emit_frame(anim, &cap, canvas, cur.delay_ms);
-                if (cur.dispose == 1) clear_region(canvas, anim->w, anim->h, &cur);
-                else if (cur.dispose == 2) memcpy(canvas, prev_save, (size_t)anim->w * anim->h * 4);
-                free(cur.idat.data);
-                memset(&cur, 0, sizeof(cur));
-            }
-            cur_active = true;
-            cur.w = be32(data + 4);
-            cur.h = be32(data + 8);
-            cur.x = be32(data + 12);
-            cur.y = be32(data + 16);
-            uint16_t dnum = be16(data + 20), dden = be16(data + 22);
-            if (dden == 0) dden = 100;
-            cur.delay_ms = (int)((uint32_t)dnum * 1000 / dden);
-            if (cur.delay_ms < 10) cur.delay_ms = 10;
-            cur.dispose = data[24];
-            cur.blend = data[25];
-            if (anim->nframes == 0) {
-                if (cur.dispose == 2) cur.dispose = 1; 
-                if (!seen_idat) default_is_frame = true;
-            }
-        } else if (!memcmp(type, "IDAT", 4)) {
-            seen_idat = true;
-            if (cur_active && default_is_frame) {
-                buf_append(&cur.idat, data, len);
-                cur.has_data = true;
-            }
-        } else if (!memcmp(type, "fdAT", 4) && len >= 4) {
-            if (cur_active) {
-                buf_append(&cur.idat, data + 4, len - 4);
-                cur.has_data = true;
-            }
-        } else if (!memcmp(type, "IEND", 4)) {
-            break;
-        } else if (!seen_idat && have_ihdr) {
-            buf_append(&shared, file + pos, 12 + len);
-        }
-        pos += 12 + len;
-    }
-
-    if (ok && cur_active && cur.has_data) {
-        uint8_t *rgba = decode_frame_png(ihdr_data, &shared, &cur);
-        if (rgba) {
-            blend_region(canvas, anim->w, anim->h, rgba, &cur);
-            free(rgba);
-            emit_frame(anim, &cap, canvas, cur.delay_ms);
-        } else {
-            ok = false;
-        }
-    }
-    free(cur.idat.data);
-    free(shared.data);
-    free(canvas);
-    free(prev_save);
-
-    if (ok && anim->nframes == 0) {
-        unsigned w, h;
-        uint8_t *rgba = NULL;
-        if (lodepng_decode32(&rgba, &w, &h, file, (size_t)flen) == 0) {
-            anim->w = (int)w;
-            anim->h = (int)h;
-            emit_frame(anim, &cap, rgba, 1000);
-            free(rgba);
-        } else {
-            ok = false;
-        }
-    }
-    if (!ok || anim->nframes == 0 || !have_ihdr) {
-        fprintf(stderr, "balloons: %s: failed to load\n", path);
-        return false;
-    }
-    if (!have_actl) {
-    }
-    return true;
-}
-
 
 typedef enum { MODE_BOUNCE, MODE_FLOAT, MODE_SCURRY, MODE_DRIFT } Mode;
 typedef enum { INTERACTION_GRAB, INTERACTION_POP } InteractionMode;
@@ -409,7 +131,6 @@ typedef struct {
     float pop_timer;
     float scheduled_pop_time;
     float scale;           
-    bool raspberry;        
 } Sprite;
 
 static float frandf(void) { return (float)rand() / (float)RAND_MAX; }
@@ -477,40 +198,7 @@ static int g_npop_anims;
 static Anim g_str_anim;
 static GLuint *g_str_tex;
 
-static bool g_raspberry;      
-static Anim g_rasp_anim;
-static GLuint *g_rasp_tex;
 static GLuint g_ghost_bg_tex;
-
-static bool load_raspberry_from_pi(void) {
-    static const char *paths[] = {
-        "/usr/share/piwiz/raspberry-pi-logo.png",
-        "/usr/share/raspberrypi-artwork/raspberry-pi-logo-small.png",
-        "/usr/share/raspberrypi-artwork/raspberry-pi-logo.png",
-    };
-    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        unsigned w = 0, h = 0;
-        uint8_t *rgba = NULL;
-        if (lodepng_decode32_file(&rgba, &w, &h, paths[i]) == 0 && rgba) {
-            size_t npix = (size_t)w * h;
-            for (size_t p = 0; p < npix; p++) {
-                uint32_t a = rgba[p * 4 + 3];
-                rgba[p * 4 + 0] = (uint8_t)(rgba[p * 4 + 0] * a / 255);
-                rgba[p * 4 + 1] = (uint8_t)(rgba[p * 4 + 1] * a / 255);
-                rgba[p * 4 + 2] = (uint8_t)(rgba[p * 4 + 2] * a / 255);
-            }
-            g_rasp_anim.w = (int)w;
-            g_rasp_anim.h = (int)h;
-            g_rasp_anim.nframes = 1;
-            g_rasp_anim.frames = malloc(sizeof(AnimFrame));
-            if (!g_rasp_anim.frames) { free(rgba); return false; }
-            g_rasp_anim.frames[0].rgba = rgba;
-            g_rasp_anim.frames[0].delay_ms = 1000;
-            return true;
-        }
-    }
-    return false;
-}
 
 static float g_wind;           
 static float g_wind_target;
@@ -767,9 +455,6 @@ static void breeze_update(float dt) {
 #define BALLOON_BODY_CY (34.0f / 128.0f)
 #define BALLOON_BOB_FRAC (3.0f / 128.0f)
 #define GHOST_BALLOON_BODY_HEIGHT_FRAC 0.70f
-#define RASPBERRY_FRAC 0.26f           /* logo width as a fraction of sprite width */
-#define RASPBERRY_CHANCE (1.0f / 300.0f)
-#define RASPBERRY_ALPHA 0.6f           /* ink opacity: lets the balloon show through */
 
 static float sprite_w(const Sprite *s, float scale) { return s->anim->w * scale * s->scale; }
 static float sprite_h(const Sprite *s, float scale) { return s->anim->h * scale * s->scale; }
@@ -781,7 +466,6 @@ static void sprite_roll_anim(Sprite *s) {
     s->frame = rand() % s->anim->nframes;
     s->frame_time = frandf() * s->anim->frames[s->frame].delay_ms;
     s->scale = BALLOON_SCALE_MIN + frandf() * (BALLOON_SCALE_MAX - BALLOON_SCALE_MIN);
-    s->raspberry = g_raspberry && (frandf() < RASPBERRY_CHANCE);
 }
 
 static void sprite_init(Sprite *s, Mode mode, float scale, float speed, int sw, int sh) {
@@ -1193,27 +877,23 @@ static void render_needle_cursor(uint32_t *px, int size) {
     }
 }
 
+/* The cursor art is smaller than the shared cursor buffer, so it is blitted
+ * into the top-left corner and the rest left transparent. The hotspot is
+ * expressed in buffer coordinates and so needs no adjustment for the margin.
+ *
+ * The pixels arrive already premultiplied, which is what WL_SHM_FORMAT_ARGB8888
+ * wants. (The PNG this replaced was packed straight into the buffer without
+ * premultiplying, so its semi-transparent edge pixels were a little too bright
+ * against dark backgrounds.) */
 static void render_hand_cursor(uint32_t *px, int size) {
     memset(px, 0, (size_t)size * size * sizeof(*px));
-    unsigned char *rgba = NULL;
-    unsigned width = 0, height = 0;
-    if (lodepng_decode32(&rgba, &width, &height,
-                         balloons_cursor_hand_grab_png,
-                         balloons_cursor_hand_grab_png_len) != 0 ||
-        width != (unsigned)size || height != (unsigned)size) {
-        free(rgba);
-        return;
+    if (size < CURSOR_HAND_GRAB_W || size < CURSOR_HAND_GRAB_H) return;
+
+    for (int y = 0; y < CURSOR_HAND_GRAB_H; ++y) {
+        memcpy(px + (size_t)y * size,
+               balloons_cursor_hand_grab_argb + (size_t)y * CURSOR_HAND_GRAB_W,
+               (size_t)CURSOR_HAND_GRAB_W * sizeof(*px));
     }
-    for (unsigned y = 0; y < height; ++y) {
-        for (unsigned x = 0; x < width; ++x) {
-            const unsigned char *src = rgba + ((size_t)y * width + x) * 4;
-            px[(size_t)y * size + x] = ((uint32_t)src[3] << 24) |
-                                       ((uint32_t)src[0] << 16) |
-                                       ((uint32_t)src[1] << 8) |
-                                       src[2];
-        }
-    }
-    free(rgba);
 }
 
 typedef void (*CursorRenderer)(uint32_t *pixels, int size);
@@ -1580,19 +1260,6 @@ static void draw_string(const Sprite *s, int sw, int sh) {
     draw_tex_quad(g_str_tex[f], x, y, w, h, sw, sh, 1);
 }
 
-static void draw_raspberry(const Sprite *s, int sw, int sh, float fade) {
-    if (!g_rasp_tex || g_rasp_anim.w <= 0) return;
-    float bw = sprite_w(s, g_scale), bh = sprite_h(s, g_scale);
-    int nf = s->anim->nframes > 0 ? s->anim->nframes : 1;
-    float bob = BALLOON_BOB_FRAC * sinf(6.2831853f * (float)s->frame / (float)nf);
-    float cx = s->x + bw * BALLOON_BODY_CX;
-    float cy = s->y + bh * (BALLOON_BODY_CY + bob);
-    float lw = bw * RASPBERRY_FRAC;
-    float lh = lw * (float)g_rasp_anim.h / (float)g_rasp_anim.w;
-    if (g_fade_loc >= 0) glUniform1f(g_fade_loc, fade * RASPBERRY_ALPHA);
-    draw_tex_quad(g_rasp_tex[0], cx - lw * 0.5f, cy - lh * 0.5f, lw, lh, sw, sh, 1);
-    if (g_fade_loc >= 0) glUniform1f(g_fade_loc, fade);   
-}
 
 
 int main(int argc, char **argv) {
@@ -1682,7 +1349,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    g_raspberry = load_raspberry_from_pi();
     startup_mark("external assets");
 
     ctx.surface = wl_compositor_create_surface(ctx.compositor);
@@ -1837,22 +1503,6 @@ int main(int argc, char **argv) {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         free(g_str_anim.frames[f].rgba);
         g_str_anim.frames[f].rgba = NULL;
-    }
-
-    if (g_raspberry && g_rasp_anim.nframes > 0) {
-        g_rasp_tex = malloc(sizeof(GLuint));
-        if (!g_rasp_tex) { fprintf(stderr, "out of memory\n"); return 1; }
-        glGenTextures(1, g_rasp_tex);
-        glBindTexture(GL_TEXTURE_2D, g_rasp_tex[0]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_rasp_anim.w, g_rasp_anim.h, 0,
-                     GL_RGBA, GL_UNSIGNED_BYTE, g_rasp_anim.frames[0].rgba);
-        GLint filt = pixel ? GL_NEAREST : GL_LINEAR;
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        free(g_rasp_anim.frames[0].rgba);
-        g_rasp_anim.frames[0].rgba = NULL;
     }
 
     g_pop_tex = calloc((size_t)g_npop_anims, sizeof(GLuint *));
@@ -2142,7 +1792,6 @@ int main(int argc, char **argv) {
                 if (s->dead) continue;
                 draw_sprite(s, scale, ctx.width, ctx.height);
                 if (!s->popped) {
-                    if (s->raspberry) draw_raspberry(s, ctx.width, ctx.height, actual_fade);
                     draw_string(s, ctx.width, ctx.height);
                 }
             }
@@ -2156,7 +1805,6 @@ int main(int argc, char **argv) {
                 if (!rect_intersects(&repaint, &g_sprite_rects[i])) continue;
                 draw_sprite(s, scale, ctx.width, ctx.height);
                 if (!s->popped) {
-                    if (s->raspberry) draw_raspberry(s, ctx.width, ctx.height, actual_fade);
                     draw_string(s, ctx.width, ctx.height);
                 }
             }

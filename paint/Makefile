@@ -8,6 +8,8 @@ PAINT_SRC := paint.c xdg-shell-protocol.c
 ICON_SRC := icon_maker.c
 GHOSTICON_DIR := $(CURDIR)/../shared
 GHOSTICON_LIB := $(GHOSTICON_DIR)/libghosticon.a
+# lodepng is only for icon_maker, which encodes the .png desktop icons at
+# build time. The toy itself decodes nothing.
 LODEPNG_LIB := $(CURDIR)/../third_party/lodepng/liblodepng.a
 TARGETS := paint icon_maker
 
@@ -32,7 +34,7 @@ endif
 # portable (no -mcpu=native, so the binary can be packaged for other machines).
 CFLAGS := -std=c11 -Wall -Wextra -Wshadow -pedantic -D_GNU_SOURCE -D_DEFAULT_SOURCE \
           -O3 -ffast-math -funroll-loops -fPIC -I$(CURDIR) -I$(RINGMENU_DIR) \
-          -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) -I$(CURDIR)/../third_party/lodepng $(WAYLAND_CFLAGS) $(TOY_AUDIO_PIPEWIRE_CFLAGS)
+          -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) $(WAYLAND_CFLAGS) $(TOY_AUDIO_PIPEWIRE_CFLAGS)
 LDFLAGS := $(WAYLAND_LIBS) $(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
 .PHONY: all clean run icons install install-user test
@@ -63,7 +65,7 @@ $(GHOSTICON_LIB): FORCE
 	$(MAKE) -C $(GHOSTICON_DIR)
 FORCE:
 
-paint: $(PAINT_SRC:.c=.o) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) $(LODEPNG_LIB)
+paint: $(PAINT_SRC:.c=.o) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 icon_maker.o: CFLAGS := -std=c99 -O2 -I$(CURDIR) -I$(CURDIR)/../third_party/lodepng
