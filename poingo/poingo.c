@@ -137,9 +137,18 @@ static int g_ball_h = 512;
 
 #define REGEN_TIME_BUDGET_MS       5.0
 #define REGEN_TIMER_CHECK_INTERVAL 4
-#define FREERANGE_REGEN_TARGET_MS  2.0
 #define FREERANGE_REGEN_COLD_START 4
-#define FREERANGE_REGEN_TARGET_TICKS 120.0f
+
+/* Regen runs as fast as the machine allows rather than to a fixed duration.
+ * Spreading it over a set number of ticks was an attempt to make it look the
+ * same everywhere, and machines are too different for that to work: it was
+ * either sluggish on a fast box or still overrunning on a slow one.
+ *
+ * What is held constant instead is the frame: each tick spends whatever is
+ * left of the frame after the rest of the work, minus this margin. A fast
+ * machine finishes in a few frames, a Pi takes longer, and neither drops a
+ * frame doing it. */
+#define FREERANGE_REGEN_HEADROOM_MS 2.0
 
 #ifndef PI
 #define PI 3.14159265358979323846f
@@ -2467,16 +2476,17 @@ static void freerange_regen_update_scanline(uint8_t * restrict dst_frame,
     }
 }
 
+/* Chunk size is about keeping per-unit overhead small, not about pacing.
+ * The chunking exists because the Pi was pathologically slow when the work
+ * was handed out finely -- the cross-thread chatter cost more than the
+ * pixels. Blocks stay coarse for that reason; they are no longer sized to
+ * make the regen last a particular number of ticks. */
 static int freerange_regen_ideal_block_size(float ms_per_block, int frame_count, int frame_h) {
-    if (ms_per_block <= 0.0f || frame_count <= 0 || frame_h <= 0) {
+    (void)ms_per_block;
+    if (frame_count <= 0 || frame_h <= 0) {
         return FREERANGE_REGEN_BLOCK_SIZE;
     }
-    float ideal_total = FREERANGE_REGEN_TARGET_TICKS * (FREERANGE_REGEN_TARGET_MS / ms_per_block);
-    float ideal_block = ((float)frame_count * (float)frame_h) / ideal_total;
-    int rounded = (int)(ideal_block + 0.5f);
-    if (rounded < FREERANGE_REGEN_BLOCK_SIZE) rounded = FREERANGE_REGEN_BLOCK_SIZE;
-    if (rounded > frame_h)                    rounded = frame_h;
-    return rounded;
+    return FREERANGE_REGEN_BLOCK_SIZE;
 }
 
 static bool freerange_regen_workspace_prepare(FreedomState *st,
@@ -2924,17 +2934,6 @@ static void freerange_color_randomize_and_regen(FreedomState *st) {
     freerange_color_regen_start(st, st->frames_ref);
 }
 
-static void freerange_clear_ball_and_start_regen(FreedomState *st) {
-    if (!st || !st->frames_ref) {
-        return;
-    }
-    if (!freerange_color_regen_prepare_assets(st, st->frames_ref)) {
-        return;
-    }
-    st->color_regen_mode = BALL_REGEN_CLEAR;
-    freerange_color_regen_start(st, st->frames_ref);
-}
-
 static void freerange_request_graceful_shutdown(FreedomState *st) {
     if (!st) {
         return;
@@ -3220,6 +3219,19 @@ static void freerange_gl_draw_frame(FreedomState *st, const FreedomFrameSet *fra
     if (st->shutdown_pending) {
         float k = st->exit_fade / POINGO_EXIT_FADE_SECONDS;
         base_alpha *= k < 0.0f ? 0.0f : (k > 1.0f ? 1.0f : k);
+    }
+    /* Fade in alongside the beam. The beam fills the ball in random chunks,
+     * so on a machine where a chunk lands badly the seams show; riding an
+     * alpha ramp over the top hides that for nothing -- the blend is already
+     * happening, only the uniform changes. Tied to how much has actually been
+     * uploaded rather than to a clock, so it tracks the beam exactly however
+     * fast the machine runs it. */
+    if (st->color_regen_active && st->color_regen_units_total > 0) {
+        float progress = (float)st->regen_units_uploaded /
+                         (float)st->color_regen_units_total;
+        if (progress < 0.0f) progress = 0.0f;
+        if (progress > 1.0f) progress = 1.0f;
+        base_alpha *= progress;
     }
     glUniform1f(st->gl_alpha_loc, base_alpha);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -4889,7 +4901,6 @@ static int run_freerange_wayland(bool start_muted) {
     double  regen_ms_per_unit   = 0.0;
     bool    prev_regen_active   = false;
     int     regen_measure_frames = 0;
-    bool    regen_rechunked      = false;
 
     int    drop_red          = 0;
     int    drop_yellow       = 0;
@@ -5284,13 +5295,16 @@ static int run_freerange_wayland(bool start_muted) {
             if (st.color_regen_active && !prev_regen_active) {
                 regen_ms_per_unit    = 0.0;
                 regen_measure_frames = 0;
-                regen_rechunked      = false;
             }
 
+            /* Everything left in the frame after the rest of the tick, less a
+             * margin. Previously this was then clamped to a small fixed
+             * figure, which is what made regen crawl on a machine with plenty
+             * of frame to spare. */
             double upload_budget_ms = TARGET_FRAME_SECONDS * 1000.0
-                                      - prev_non_upload_ms - 2.0;
-            if (upload_budget_ms > FREERANGE_REGEN_TARGET_MS)
-                upload_budget_ms = FREERANGE_REGEN_TARGET_MS;
+                                      - prev_non_upload_ms
+                                      - FREERANGE_REGEN_HEADROOM_MS;
+            if (upload_budget_ms < 0.5) upload_budget_ms = 0.5;
 
             int upload_max;
             if (regen_ms_per_unit <= 0.0) {
@@ -5316,17 +5330,11 @@ static int run_freerange_wayland(bool start_muted) {
                 regen_measure_frames++;
             }
 
-            if (st.color_regen_active && !regen_rechunked && regen_measure_frames >= 2
-                && st.regen_ms_per_block > 0.0f
-                && (int)st.regen_units_uploaded * 4 < (int)st.color_regen_units_total) {
-                int cur   = st.color_regen_block_size;
-                int ideal = freerange_regen_ideal_block_size(st.regen_ms_per_block,
-                                                             frames.frame_count, frames.frame_h);
-                if (ideal >= cur * 2 || ideal * 2 <= cur) {
-                    regen_rechunked = true;
-                    freerange_color_regen_start(&st, &frames);
-                }
-            }
+            /* The regen used to re-chunk itself mid-flight -- measure a
+             * couple of frames, decide the blocks were the wrong size for the
+             * duration it was aiming at, and restart. Restarting threw away
+             * the work already uploaded and made the ball visibly stutter.
+             * There is no target duration to chase now, so it just runs. */
             prev_regen_active = st.color_regen_active;
             if (st.color_regen_mode == BALL_REGEN_CLEAR && !st.color_regen_active && !st.ball_cleared) {
                 st.ball_cleared = true;
