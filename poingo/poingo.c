@@ -2199,6 +2199,10 @@ typedef struct {
     uint8_t *color_regen_ball_pixels;
     int color_regen_mode;
     int color_regen_block_size;
+    /* Alpha fades in with the very first beam only. A colour change regen
+     * replaces a ball that is already on screen, and fading that one out and
+     * back in reads as a flicker rather than an arrival. */
+    bool color_regen_fade_in;
     float regen_ms_per_block;
     RegenWorkerCtx *regen_worker_ctx;
     RegenWorkerCtx regen_ctx_storage;
@@ -2548,6 +2552,7 @@ static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet 
     st->color_regen_cursor = 0;
     st->color_regen_units_done = 0;
     st->color_regen_units_total = total_units;
+    st->color_regen_fade_in = false;   /* opt-in; see the startup beam */
 
     freerange_regen_workers_shutdown(st);
 
@@ -3220,13 +3225,17 @@ static void freerange_gl_draw_frame(FreedomState *st, const FreedomFrameSet *fra
         float k = st->exit_fade / POINGO_EXIT_FADE_SECONDS;
         base_alpha *= k < 0.0f ? 0.0f : (k > 1.0f ? 1.0f : k);
     }
-    /* Fade in alongside the beam. The beam fills the ball in random chunks,
-     * so on a machine where a chunk lands badly the seams show; riding an
-     * alpha ramp over the top hides that for nothing -- the blend is already
+    /* Fade in alongside the first beam. It fills the ball in random chunks, so
+     * on a machine where a chunk lands badly the seams show; riding an alpha
+     * ramp over the top hides that for nothing -- the blend is already
      * happening, only the uniform changes. Tied to how much has actually been
      * uploaded rather than to a clock, so it tracks the beam exactly however
-     * fast the machine runs it. */
-    if (st->color_regen_active && st->color_regen_units_total > 0) {
+     * fast the machine runs it.
+     *
+     * Not applied to a colour change: there the ball is already on screen, and
+     * dimming it to nothing and back is a flicker, not an arrival. */
+    if (st->color_regen_fade_in && st->color_regen_active &&
+        st->color_regen_units_total > 0) {
         float progress = (float)st->regen_units_uploaded /
                          (float)st->color_regen_units_total;
         if (progress < 0.0f) progress = 0.0f;
@@ -4578,6 +4587,8 @@ static int run_freerange_wayland(bool start_muted) {
             use_blank_frames = false;
         } else {
             freerange_color_regen_start(&st, &frames);
+            /* The one regen that is an arrival rather than a change. */
+            st.color_regen_fade_in = true;
         }
     }
     if (!use_blank_frames) {
