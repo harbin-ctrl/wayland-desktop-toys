@@ -99,15 +99,25 @@ static int g_menu_rect[4] = {0, 0, -1, -1};
 static unsigned int g_menu_tex = 0;
 static int g_menu_tex_w = 0, g_menu_tex_h = 0;
 /* The colour field costs a per-pixel atan2 + HSL over its whole disc, but it
-   only depends on the slot and the menu's placement - not on the pointer. It
-   is rendered once per slot and composited from here on every later frame. */
-static uint32_t *g_field_cache = NULL;
-static size_t g_field_cache_cap = 0;
+   depends only on which slot it belongs to and on the rect's placement
+   relative to the menu centre - never on the pointer, and never on where the
+   menu sits on screen, since the rect is always centred on it. So one cache
+   per pen slot outlives both moving the menu and switching pens. */
+#define FIELD_CACHE_SLOTS 2
+static struct {
+    uint32_t *px;
+    size_t cap;
+    int slot;           /* -1 when nothing is cached here */
+    int w, h;           /* rect the field was drawn for */
+    int off_x, off_y;   /* that rect's origin, relative to the menu centre */
+} g_field_cache[FIELD_CACHE_SLOTS] = {
+    { NULL, 0, -1, 0, 0, 0, 0 },
+    { NULL, 0, -1, 0, 0, 0, 0 },
+};
 static bool g_menu_full_upload = true;   /* next redraw must refresh it all */
+static int g_menu_tex_slot = -1;         /* whose field the texture holds */
 static uint32_t *g_upload_staging = NULL;
 static size_t g_upload_cap = 0;
-static int g_field_cache_slot = -1;
-static int g_field_cache_rect[4] = {0, 0, -1, -1};
 static bool g_menu_was_open = false;
 static int g_picker_slot = -1;      
 static bool g_picker_locked = false;
@@ -5585,34 +5595,40 @@ static int run_freerange_wayland(bool start_muted) {
                     size_t need = (size_t)mw * mh;
                     if (g_menu_scratch && need <= g_menu_scratch_cap) {
                         bool field_cached = false;
+                        int fc_i = (g_picker_slot >= 0 &&
+                                    g_picker_slot < FIELD_CACHE_SLOTS)
+                                       ? g_picker_slot : 0;
                         if (g_picker_slot >= 0) {
-                            if (g_field_cache_slot != g_picker_slot ||
-                                g_field_cache_rect[0] != mx ||
-                                g_field_cache_rect[1] != my ||
-                                g_field_cache_rect[2] != mw ||
-                                g_field_cache_rect[3] != mh ||
-                                g_field_cache_cap < need) {
-                                if (g_field_cache_cap < need) {
-                                    uint32_t *grown = realloc(g_field_cache, need * 4);
+                            int mcx, mcy;
+                            ringmenu_geometry(g_menu, &mcx, &mcy, NULL, NULL);
+                            if (g_field_cache[fc_i].slot != g_picker_slot ||
+                                g_field_cache[fc_i].w != mw ||
+                                g_field_cache[fc_i].h != mh ||
+                                g_field_cache[fc_i].off_x != mx - mcx ||
+                                g_field_cache[fc_i].off_y != my - mcy ||
+                                g_field_cache[fc_i].cap < need) {
+                                if (g_field_cache[fc_i].cap < need) {
+                                    uint32_t *grown = realloc(g_field_cache[fc_i].px,
+                                                              need * 4);
                                     if (grown) {
-                                        g_field_cache = grown;
-                                        g_field_cache_cap = need;
+                                        g_field_cache[fc_i].px = grown;
+                                        g_field_cache[fc_i].cap = need;
                                     }
                                 }
-                                if (g_field_cache_cap >= need) {
-                                    memset(g_field_cache, 0, need * 4);
+                                if (g_field_cache[fc_i].cap >= need) {
+                                    memset(g_field_cache[fc_i].px, 0, need * 4);
                                     ringmenu_field_draw(g_menu, g_picker_slot,
-                                                        g_field_cache, mw, mh, mx, my);
-                                    g_field_cache_slot = g_picker_slot;
-                                    g_menu_full_upload = true;
-                                    g_field_cache_rect[0] = mx;
-                                    g_field_cache_rect[1] = my;
-                                    g_field_cache_rect[2] = mw;
-                                    g_field_cache_rect[3] = mh;
+                                                        g_field_cache[fc_i].px,
+                                                        mw, mh, mx, my);
+                                    g_field_cache[fc_i].slot = g_picker_slot;
+                                    g_field_cache[fc_i].w = mw;
+                                    g_field_cache[fc_i].h = mh;
+                                    g_field_cache[fc_i].off_x = mx - mcx;
+                                    g_field_cache[fc_i].off_y = my - mcy;
                                 }
                             }
-                            field_cached = (g_field_cache_slot == g_picker_slot &&
-                                            g_field_cache_cap >= need);
+                            field_cached = (g_field_cache[fc_i].slot == g_picker_slot &&
+                                            g_field_cache[fc_i].cap >= need);
                         }
 
                         /* Restoring, premultiplying and uploading the whole
@@ -5620,6 +5636,7 @@ static int run_freerange_wayland(bool start_muted) {
                            the texture, only the ring's own box can have
                            changed, so confine all three to it. */
                         bool whole = !field_cached || g_menu_full_upload ||
+                                     g_menu_tex_slot != g_picker_slot ||
                                      mw != g_menu_tex_w || mh != g_menu_tex_h;
                         int ux = whole ? 0 : rx - mx;
                         int uy = whole ? 0 : ry - my;
@@ -5640,12 +5657,12 @@ static int run_freerange_wayland(bool start_muted) {
                                                     g_menu_scratch, mw, mh, mx, my);
                             }
                         } else if (whole) {
-                            memcpy(g_menu_scratch, g_field_cache, need * 4);
+                            memcpy(g_menu_scratch, g_field_cache[fc_i].px, need * 4);
                         } else {
                             for (int row = 0; row < uh; row++) {
                                 size_t off = (size_t)(uy + row) * mw + ux;
                                 memcpy(g_menu_scratch + off,
-                                       g_field_cache + off, (size_t)uw * 4);
+                                       g_field_cache[fc_i].px + off, (size_t)uw * 4);
                             }
                         }
                         ringmenu_draw(g_menu, g_menu_scratch, mw, mh, mx, my);
@@ -5699,6 +5716,7 @@ static int run_freerange_wayland(bool start_muted) {
                             }
                         }
                         g_menu_full_upload = false;
+                        g_menu_tex_slot = g_picker_slot;
                     }
                 }
                 float x0 = 2.f * mx / st.width - 1.f;
@@ -5909,7 +5927,11 @@ static int run_freerange_wayland(bool start_muted) {
     shutdown_audio();
     if (g_menu) { ringmenu_destroy(g_menu); g_menu = NULL; }
     if (g_menu_scratch) { free(g_menu_scratch); g_menu_scratch = NULL; }
-    if (g_field_cache) { free(g_field_cache); g_field_cache = NULL; g_field_cache_cap = 0; }
+    for (int i = 0; i < FIELD_CACHE_SLOTS; i++) {
+        free(g_field_cache[i].px);
+        g_field_cache[i].px = NULL;
+        g_field_cache[i].cap = 0;
+    }
     if (g_upload_staging) { free(g_upload_staging); g_upload_staging = NULL; g_upload_cap = 0; }
     free(st.regen_unit_done_storage);
     free(st.regen_order_storage);
