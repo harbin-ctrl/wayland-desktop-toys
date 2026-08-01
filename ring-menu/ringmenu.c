@@ -726,7 +726,8 @@ static float rm_sd_teardrop(float px, float py, float r1, float r2, float h) {
 uint32_t *ringmenu_color_drop(uint8_t r, uint8_t g, uint8_t b,
                               int slot, int count, int size) {
     if (count < 1 || size < 1) return NULL;
-    uint32_t *px_buf = calloc((size_t)size * size, 4);
+    // No calloc: ringmenu_color_drop_into clears the buffer itself.
+    uint32_t *px_buf = malloc((size_t)size * size * 4);
     if (!px_buf) return NULL;
     if (!ringmenu_color_drop_into(px_buf, (size_t)size * size,
                                   r, g, b, slot, count, size)) {
