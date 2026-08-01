@@ -103,6 +103,9 @@ static int g_menu_tex_w = 0, g_menu_tex_h = 0;
    is rendered once per slot and composited from here on every later frame. */
 static uint32_t *g_field_cache = NULL;
 static size_t g_field_cache_cap = 0;
+static bool g_menu_full_upload = true;   /* next redraw must refresh it all */
+static uint32_t *g_upload_staging = NULL;
+static size_t g_upload_cap = 0;
 static int g_field_cache_slot = -1;
 static int g_field_cache_rect[4] = {0, 0, -1, -1};
 static bool g_menu_was_open = false;
@@ -3999,7 +4002,12 @@ static void freerange_pointer_motion(void *data, struct wl_pointer *pointer,
 
         if (slot >= 0) {
             uint8_t pr, pg, pb;
-            if (ringmenu_field_color(g_menu, slot, x, y, &pr, &pg, &pb)) {
+            if (ringmenu_field_color(g_menu, slot, x, y, &pr, &pg, &pb) &&
+                (pr != g_picker_color[0] || pg != g_picker_color[1] ||
+                 pb != g_picker_color[2])) {
+                /* Motion arrives at the mouse's report rate in 1/256ths of a
+                   pixel, so plenty of events land on the colour already shown;
+                   repainting for those is just a dropped frame. */
                 g_picker_color[0] = pr;
                 g_picker_color[1] = pg;
                 g_picker_color[2] = pb;
@@ -5519,6 +5527,10 @@ static int run_freerange_wayland(bool start_muted) {
             if (menu_open) {
                 int mx, my, mw, mh;
                 ringmenu_rect(g_menu, &mx, &my, &mw, &mh);
+                /* The ring is the only part that changes as the pointer
+                   moves; when the picker widens the rect below, everything
+                   outside this stays the field, which is already cached. */
+                const int rx = mx, ry = my, rw = mw, rh = mh;
                 if (g_picker_slot >= 0) {
                     int mcx, mcy;
                     ringmenu_geometry(g_menu, &mcx, &mcy, NULL, NULL);
@@ -5567,46 +5579,101 @@ static int run_freerange_wayland(bool start_muted) {
                                     ringmenu_field_draw(g_menu, g_picker_slot,
                                                         g_field_cache, mw, mh, mx, my);
                                     g_field_cache_slot = g_picker_slot;
+                                    g_menu_full_upload = true;
                                     g_field_cache_rect[0] = mx;
                                     g_field_cache_rect[1] = my;
                                     g_field_cache_rect[2] = mw;
                                     g_field_cache_rect[3] = mh;
                                 }
                             }
-                            if (g_field_cache_slot == g_picker_slot &&
-                                g_field_cache_cap >= need) {
-                                memcpy(g_menu_scratch, g_field_cache, need * 4);
-                                field_cached = true;
-                            }
+                            field_cached = (g_field_cache_slot == g_picker_slot &&
+                                            g_field_cache_cap >= need);
                         }
+
+                        /* Restoring, premultiplying and uploading the whole
+                           rect costs ~5ms at picker size. Once the field is on
+                           the texture, only the ring's own box can have
+                           changed, so confine all three to it. */
+                        bool whole = !field_cached || g_menu_full_upload ||
+                                     mw != g_menu_tex_w || mh != g_menu_tex_h;
+                        int ux = whole ? 0 : rx - mx;
+                        int uy = whole ? 0 : ry - my;
+                        int uw = whole ? mw : rw;
+                        int uh = whole ? mh : rh;
+                        if (ux < 0) { uw += ux; ux = 0; }
+                        if (uy < 0) { uh += uy; uy = 0; }
+                        if (ux + uw > mw) uw = mw - ux;
+                        if (uy + uh > mh) uh = mh - uy;
+
+                        /* Lay down straight-alpha pixels for whatever is about
+                           to be recomposited; the rest of the buffer keeps the
+                           premultiplied copy already sitting on the texture. */
                         if (!field_cached) {
                             memset(g_menu_scratch, 0, need * 4);
                             if (g_picker_slot >= 0) {
                                 ringmenu_field_draw(g_menu, g_picker_slot,
                                                     g_menu_scratch, mw, mh, mx, my);
                             }
+                        } else if (whole) {
+                            memcpy(g_menu_scratch, g_field_cache, need * 4);
+                        } else {
+                            for (int row = 0; row < uh; row++) {
+                                size_t off = (size_t)(uy + row) * mw + ux;
+                                memcpy(g_menu_scratch + off,
+                                       g_field_cache + off, (size_t)uw * 4);
+                            }
                         }
                         ringmenu_draw(g_menu, g_menu_scratch, mw, mh, mx, my);
-                        for (size_t i = 0; i < (size_t)mw * mh; i++) {
-                            uint32_t c = g_menu_scratch[i];
-                            uint32_t a = c >> 24;
-                            if (a == 0) { g_menu_scratch[i] = 0; continue; }
-                            if (a == 255) continue;
-                            uint32_t r = ((c & 0xFF) * a + 127) / 255;
-                            uint32_t g_val = (((c >> 8) & 0xFF) * a + 127) / 255;
-                            uint32_t b = (((c >> 16) & 0xFF) * a + 127) / 255;
-                            g_menu_scratch[i] = r | (g_val << 8) | (b << 16) | (a << 24);
+                        for (int row = 0; row < uh; row++) {
+                            uint32_t *p = g_menu_scratch + (size_t)(uy + row) * mw + ux;
+                            for (int col = 0; col < uw; col++) {
+                                uint32_t c = p[col];
+                                uint32_t a = c >> 24;
+                                if (a == 0) { p[col] = 0; continue; }
+                                if (a == 255) continue;
+                                uint32_t r = ((c & 0xFF) * a + 127) / 255;
+                                uint32_t g_val = (((c >> 8) & 0xFF) * a + 127) / 255;
+                                uint32_t b = (((c >> 16) & 0xFF) * a + 127) / 255;
+                                p[col] = r | (g_val << 8) | (b << 16) | (a << 24);
+                            }
                         }
+
                         glBindTexture(GL_TEXTURE_2D, g_menu_tex);
-                        if (mw == g_menu_tex_w && mh == g_menu_tex_h) {
-                            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mw, mh,
-                                            GL_RGBA, GL_UNSIGNED_BYTE, g_menu_scratch);
-                        } else {
+                        if (mw != g_menu_tex_w || mh != g_menu_tex_h) {
                             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, mw, mh, 0,
                                          GL_RGBA, GL_UNSIGNED_BYTE, g_menu_scratch);
                             g_menu_tex_w = mw;
                             g_menu_tex_h = mh;
+                        } else if (whole) {
+                            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mw, mh,
+                                            GL_RGBA, GL_UNSIGNED_BYTE, g_menu_scratch);
+                        } else if (uw > 0 && uh > 0) {
+                            /* GLES2 has no GL_UNPACK_ROW_LENGTH, so the rows
+                               have to be gathered before they go up. */
+                            size_t rows = (size_t)uw * uh;
+                            if (g_upload_cap < rows) {
+                                uint32_t *grown = realloc(g_upload_staging, rows * 4);
+                                if (grown) {
+                                    g_upload_staging = grown;
+                                    g_upload_cap = rows;
+                                }
+                            }
+                            if (g_upload_cap >= rows) {
+                                for (int row = 0; row < uh; row++) {
+                                    memcpy(g_upload_staging + (size_t)row * uw,
+                                           g_menu_scratch + (size_t)(uy + row) * mw + ux,
+                                           (size_t)uw * 4);
+                                }
+                                glTexSubImage2D(GL_TEXTURE_2D, 0, ux, uy, uw, uh,
+                                                GL_RGBA, GL_UNSIGNED_BYTE,
+                                                g_upload_staging);
+                            } else {
+                                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mw, mh,
+                                                GL_RGBA, GL_UNSIGNED_BYTE,
+                                                g_menu_scratch);
+                            }
                         }
+                        g_menu_full_upload = false;
                     }
                 }
                 float x0 = 2.f * mx / st.width - 1.f;
@@ -5818,6 +5885,7 @@ static int run_freerange_wayland(bool start_muted) {
     if (g_menu) { ringmenu_destroy(g_menu); g_menu = NULL; }
     if (g_menu_scratch) { free(g_menu_scratch); g_menu_scratch = NULL; }
     if (g_field_cache) { free(g_field_cache); g_field_cache = NULL; g_field_cache_cap = 0; }
+    if (g_upload_staging) { free(g_upload_staging); g_upload_staging = NULL; g_upload_cap = 0; }
     free(st.regen_unit_done_storage);
     free(st.regen_order_storage);
     free(st.regen_thread_storage);
