@@ -4026,6 +4026,97 @@ static void freerange_pointer_motion(void *data, struct wl_pointer *pointer,
     }
 }
 
+/* Ends a left-button grab: drops the ball and hands it whatever velocity
+   the slingshot pull or the flick history calls for. Split out of the
+   button handler because the ring menu swallows the release event and
+   still has to let go of the ball. */
+static void freerange_release_grab(FreedomState *st) {
+    st->pointer_down = false;
+
+    if (st->ball_grabbed) {
+        st->ball_grabbed = false;
+
+        float slingshot_threshold_x = 20.0f;
+        float slingshot_threshold_y = 20.0f / (float)st->height;
+        bool has_slingshot_x = fabsf(st->slingshot_pull_x) > slingshot_threshold_x;
+        bool has_slingshot_y = fabsf(st->slingshot_pull_y) > slingshot_threshold_y;
+
+        if (has_slingshot_x || has_slingshot_y) {
+            float slingshot_scale = 0.3f * 3.0f;
+            if (has_slingshot_x) {
+                st->ball_vx = fabsf(st->slingshot_pull_x * slingshot_scale);
+                st->ball_vx_direction = (st->slingshot_pull_x > 0.0f) ? -1 : 1;
+            } else {
+                st->ball_vx = 0.0f;
+            }
+            if (has_slingshot_y) {
+                st->ball_vy = -(st->slingshot_pull_y * slingshot_scale);
+            } else {
+                st->ball_vy = 0.0f;
+            }
+
+            float max_vx = (float)st->width * 0.4f;
+            float max_vy = 0.4f;
+            if (st->ball_vx > max_vx) st->ball_vx = max_vx;
+            if (fabsf(st->ball_vy) > max_vy) {
+                st->ball_vy = (st->ball_vy > 0.0f) ? max_vy : -max_vy;
+            }
+        } else {
+            uint32_t current_time = poingo_ticks_ms();
+            uint32_t flick_time_window = 100;
+            int oldest_valid_index = -1;
+            uint32_t oldest_time = current_time;
+            for (int i = 0; i < FREEDOM_MOUSE_HISTORY_SIZE; i++) {
+                if (st->mouse_history[i].time > 0 &&
+                    (current_time - st->mouse_history[i].time) <= flick_time_window &&
+                    st->mouse_history[i].time < oldest_time) {
+                    oldest_time = st->mouse_history[i].time;
+                    oldest_valid_index = i;
+                }
+            }
+            if (oldest_valid_index >= 0) {
+                float dx = (float)st->pointer_x - (float)st->mouse_history[oldest_valid_index].x;
+                float dy = (float)st->pointer_y - (float)st->mouse_history[oldest_valid_index].y;
+                float dt = (float)(current_time - st->mouse_history[oldest_valid_index].time);
+                if (dt > 0.001f) {
+                    float vx_pixels_per_ms = dx / dt;
+                    float vy_pixels_per_ms = dy / dt;
+                    float total_distance = sqrtf(dx * dx + dy * dy);
+                    float speed_pixels_per_ms = total_distance / dt;
+                    if (speed_pixels_per_ms > 1.0f) {
+                        float ms_to_frame_60fps = 16.67f;
+                        float scale_factor_x = 2.0f * ms_to_frame_60fps;
+                        float scale_factor_y = 1.0f * ms_to_frame_60fps;
+
+                        st->ball_vx = fabsf(vx_pixels_per_ms * scale_factor_x);
+                        st->ball_vx_direction = (vx_pixels_per_ms >= 0.0f) ? 1 : -1;
+                        st->ball_vy = (vy_pixels_per_ms * scale_factor_y) / (float)st->height;
+
+                        float max_vx = (float)st->width * 0.4f;
+                        float max_vy = 0.4f;
+                        if (st->ball_vx > max_vx) st->ball_vx = max_vx;
+                        if (fabsf(st->ball_vy) > max_vy) {
+                            st->ball_vy = (st->ball_vy > 0.0f) ? max_vy : -max_vy;
+                        }
+                    } else {
+                        st->ball_vx = 0.0f;
+                        st->ball_vy = 0.0f;
+                    }
+                } else {
+                    st->ball_vx = 0.0f;
+                    st->ball_vy = 0.0f;
+                }
+            } else {
+                st->ball_vx = 0.0f;
+                st->ball_vy = 0.0f;
+            }
+        }
+
+        st->slingshot_pull_x = 0.0f;
+        st->slingshot_pull_y = 0.0f;
+    }
+}
+
 static void freerange_pointer_button(void *data, struct wl_pointer *pointer,
                                    uint32_t serial, uint32_t time, uint32_t button,
                                    uint32_t state) {
@@ -4037,6 +4128,13 @@ static void freerange_pointer_button(void *data, struct wl_pointer *pointer,
         return;
     }
     if (g_menu && ringmenu_is_open(g_menu)) {
+        /* The grab and the menu are separate states that happen to share the
+           pointer, so an open menu must not swallow the end of a grab: the
+           release still drops the ball, then goes on to the menu as usual. */
+        if (button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_RELEASED) {
+            freerange_release_grab(st);
+        }
+
         int rbtn = -1;
         if (button == BTN_LEFT) rbtn = RINGMENU_BTN_LEFT;
         else if (button == BTN_RIGHT) rbtn = RINGMENU_BTN_RIGHT;
@@ -4126,108 +4224,25 @@ static void freerange_pointer_button(void *data, struct wl_pointer *pointer,
     if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
         st->pointer_down = true;
 
-	        if (is_mouse_over_ball(st->pointer_x, st->pointer_y,
-	                               st->ball_x, st->ball_y,
-	                               st->width, st->height)) {
-	            st->ball_grabbed = true;
-	            if (st->ball_diameter > 0.0f) {
-	                float ball_y_pixels = st->ball_y * (float)st->height;
-	                st->grab_u = ((float)st->pointer_x - st->ball_x) / st->ball_diameter;
-	                st->grab_v = ((float)st->pointer_y - ball_y_pixels) / st->ball_diameter;
-	                st->grab_u = fmaxf(0.0f, fminf(1.0f, st->grab_u));
-	                st->grab_v = fmaxf(0.0f, fminf(1.0f, st->grab_v));
-	            } else {
-	                st->grab_u = 0.5f;
-	                st->grab_v = 0.5f;
-	            }
-	            st->slingshot_pull_x = 0.0f;
-	            st->slingshot_pull_y = 0.0f;
-	        }
-	    } else if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
-        st->pointer_down = false;
-
-        if (st->ball_grabbed) {
-            st->ball_grabbed = false;
-
-            float slingshot_threshold_x = 20.0f;
-            float slingshot_threshold_y = 20.0f / (float)st->height;
-            bool has_slingshot_x = fabsf(st->slingshot_pull_x) > slingshot_threshold_x;
-            bool has_slingshot_y = fabsf(st->slingshot_pull_y) > slingshot_threshold_y;
-
-            if (has_slingshot_x || has_slingshot_y) {
-                float slingshot_scale = 0.3f * 3.0f;
-                if (has_slingshot_x) {
-                    st->ball_vx = fabsf(st->slingshot_pull_x * slingshot_scale);
-                    st->ball_vx_direction = (st->slingshot_pull_x > 0.0f) ? -1 : 1;
-                } else {
-                    st->ball_vx = 0.0f;
-                }
-                if (has_slingshot_y) {
-                    st->ball_vy = -(st->slingshot_pull_y * slingshot_scale);
-                } else {
-                    st->ball_vy = 0.0f;
-                }
-
-                float max_vx = (float)st->width * 0.4f;
-                float max_vy = 0.4f;
-                if (st->ball_vx > max_vx) st->ball_vx = max_vx;
-                if (fabsf(st->ball_vy) > max_vy) {
-                    st->ball_vy = (st->ball_vy > 0.0f) ? max_vy : -max_vy;
-                }
+        if (is_mouse_over_ball(st->pointer_x, st->pointer_y,
+                               st->ball_x, st->ball_y,
+                               st->width, st->height)) {
+            st->ball_grabbed = true;
+            if (st->ball_diameter > 0.0f) {
+                float ball_y_pixels = st->ball_y * (float)st->height;
+                st->grab_u = ((float)st->pointer_x - st->ball_x) / st->ball_diameter;
+                st->grab_v = ((float)st->pointer_y - ball_y_pixels) / st->ball_diameter;
+                st->grab_u = fmaxf(0.0f, fminf(1.0f, st->grab_u));
+                st->grab_v = fmaxf(0.0f, fminf(1.0f, st->grab_v));
             } else {
-                uint32_t current_time = poingo_ticks_ms();
-                uint32_t flick_time_window = 100;
-                int oldest_valid_index = -1;
-                uint32_t oldest_time = current_time;
-                for (int i = 0; i < FREEDOM_MOUSE_HISTORY_SIZE; i++) {
-                    if (st->mouse_history[i].time > 0 &&
-                        (current_time - st->mouse_history[i].time) <= flick_time_window &&
-                        st->mouse_history[i].time < oldest_time) {
-                        oldest_time = st->mouse_history[i].time;
-                        oldest_valid_index = i;
-                    }
-                }
-                if (oldest_valid_index >= 0) {
-                    float dx = (float)st->pointer_x - (float)st->mouse_history[oldest_valid_index].x;
-                    float dy = (float)st->pointer_y - (float)st->mouse_history[oldest_valid_index].y;
-                    float dt = (float)(current_time - st->mouse_history[oldest_valid_index].time);
-                    if (dt > 0.001f) {
-                        float vx_pixels_per_ms = dx / dt;
-                        float vy_pixels_per_ms = dy / dt;
-                        float total_distance = sqrtf(dx * dx + dy * dy);
-                        float speed_pixels_per_ms = total_distance / dt;
-                        if (speed_pixels_per_ms > 1.0f) {
-                            float ms_to_frame_60fps = 16.67f;
-                            float scale_factor_x = 2.0f * ms_to_frame_60fps;
-                            float scale_factor_y = 1.0f * ms_to_frame_60fps;
-
-                            st->ball_vx = fabsf(vx_pixels_per_ms * scale_factor_x);
-                            st->ball_vx_direction = (vx_pixels_per_ms >= 0.0f) ? 1 : -1;
-                            st->ball_vy = (vy_pixels_per_ms * scale_factor_y) / (float)st->height;
-
-                            float max_vx = (float)st->width * 0.4f;
-                            float max_vy = 0.4f;
-                            if (st->ball_vx > max_vx) st->ball_vx = max_vx;
-                            if (fabsf(st->ball_vy) > max_vy) {
-                                st->ball_vy = (st->ball_vy > 0.0f) ? max_vy : -max_vy;
-                            }
-                        } else {
-                            st->ball_vx = 0.0f;
-                            st->ball_vy = 0.0f;
-                        }
-                    } else {
-                        st->ball_vx = 0.0f;
-                        st->ball_vy = 0.0f;
-                    }
-                } else {
-                    st->ball_vx = 0.0f;
-                    st->ball_vy = 0.0f;
-                }
+                st->grab_u = 0.5f;
+                st->grab_v = 0.5f;
             }
-
             st->slingshot_pull_x = 0.0f;
             st->slingshot_pull_y = 0.0f;
         }
+    } else if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        freerange_release_grab(st);
     }
 }
 
