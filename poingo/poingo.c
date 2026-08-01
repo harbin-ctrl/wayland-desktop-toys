@@ -4526,6 +4526,33 @@ static const struct wl_callback_listener wayland_frame_listener = {
 };
 
 
+/* The menu's on-screen box: ring[] is the ring proper, full[] takes in the
+   colour field when the picker is up. False when the menu is closed. */
+static bool poingo_menu_rects(int ring[4], int full[4]) {
+    if (!g_menu || !ringmenu_is_open(g_menu)) return false;
+    int mx, my, mw, mh;
+    ringmenu_rect(g_menu, &mx, &my, &mw, &mh);
+    ring[0] = mx; ring[1] = my; ring[2] = mw; ring[3] = mh;
+    if (g_picker_slot >= 0) {
+        int mcx, mcy;
+        ringmenu_geometry(g_menu, &mcx, &mcy, NULL, NULL);
+        float fr = ringmenu_field_radius(g_menu);
+        int x1 = mx + mw, y1 = my + mh;
+        int fx0 = (int)floorf((float)mcx - fr);
+        int fy0 = (int)floorf((float)mcy - fr);
+        int fx1 = (int)ceilf((float)mcx + fr);
+        int fy1 = (int)ceilf((float)mcy + fr);
+        if (fx0 < mx) mx = fx0;
+        if (fy0 < my) my = fy0;
+        if (fx1 > x1) x1 = fx1;
+        if (fy1 > y1) y1 = fy1;
+        mw = x1 - mx;
+        mh = y1 - my;
+    }
+    full[0] = mx; full[1] = my; full[2] = mw; full[3] = mh;
+    return true;
+}
+
 static int run_freerange_wayland(bool start_muted) {
     FreedomState st = {0};
     st.running = true;
@@ -5413,9 +5440,7 @@ static int run_freerange_wayland(bool start_muted) {
             bool menu_active = menu_open || g_menu_was_open;
 
             FreerangeRect cur_rect = {0, 0, 0, 0};
-            if (menu_active) {
-                cur_rect = (FreerangeRect){0, 0, st.width, st.height};
-            } else {
+            {
                 float bx, by, bw, bh;
                 if (freerange_ball_dest_quad(&st, &frames, render_extrap_dt,
                                              &bx, &by, &bw, &bh)) {
@@ -5433,12 +5458,26 @@ static int run_freerange_wayland(bool start_muted) {
                     FreerangeRect br = { st.width - GHOST_ICON_SIZE - GHOST_ICON_MARGIN, GHOST_ICON_MARGIN, GHOST_ICON_SIZE, GHOST_ICON_SIZE };
                     freerange_rect_union(&cur_rect, &br);
                 }
+                /* The menu used to damage the whole screen, which made the
+                   compositor recomposite 1920x1080 every frame it was up and
+                   cost more than drawing it. Its own box is enough; the frame
+                   it closes on repaints the box it last occupied. */
+                int ring[4], full[4];
+                if (menu_open && poingo_menu_rects(ring, full)) {
+                    FreerangeRect mr = { full[0] - 2, full[1] - 2,
+                                         full[2] + 4, full[3] + 4 };
+                    freerange_rect_union(&cur_rect, &mr);
+                } else if (menu_active && g_menu_rect[2] > 0) {
+                    FreerangeRect mr = { g_menu_rect[0] - 2, g_menu_rect[1] - 2,
+                                         g_menu_rect[2] + 4, g_menu_rect[3] + 4 };
+                    freerange_rect_union(&cur_rect, &mr);
+                }
                 freerange_rect_clamp(&cur_rect, st.width, st.height);
             }
 
             bool repaint_full = true;
             FreerangeRect repaint = cur_rect;
-            if (has_buffer_age && !menu_active) {
+            if (has_buffer_age) {
                 EGLint age = 0;
                 if (eglQuerySurface(st.egl_display, st.egl_surface,
                                     EGL_BUFFER_AGE_EXT, &age) &&
@@ -5524,29 +5563,15 @@ static int run_freerange_wayland(bool start_muted) {
 
             g_menu_was_open = menu_open;
 
-            if (menu_open) {
-                int mx, my, mw, mh;
-                ringmenu_rect(g_menu, &mx, &my, &mw, &mh);
+            int menu_ring[4], menu_full[4];
+            if (menu_open && poingo_menu_rects(menu_ring, menu_full)) {
+                int mx = menu_full[0], my = menu_full[1];
+                int mw = menu_full[2], mh = menu_full[3];
                 /* The ring is the only part that changes as the pointer
-                   moves; when the picker widens the rect below, everything
-                   outside this stays the field, which is already cached. */
-                const int rx = mx, ry = my, rw = mw, rh = mh;
-                if (g_picker_slot >= 0) {
-                    int mcx, mcy;
-                    ringmenu_geometry(g_menu, &mcx, &mcy, NULL, NULL);
-                    float fr = ringmenu_field_radius(g_menu);
-                    int x1 = mx + mw, y1 = my + mh;
-                    int fx0 = (int)floorf((float)mcx - fr);
-                    int fy0 = (int)floorf((float)mcy - fr);
-                    int fx1 = (int)ceilf((float)mcx + fr);
-                    int fy1 = (int)ceilf((float)mcy + fr);
-                    if (fx0 < mx) mx = fx0;
-                    if (fy0 < my) my = fy0;
-                    if (fx1 > x1) x1 = fx1;
-                    if (fy1 > y1) y1 = fy1;
-                    mw = x1 - mx;
-                    mh = y1 - my;
-                }
+                   moves; everything outside it stays the field, which is
+                   already cached. */
+                const int rx = menu_ring[0], ry = menu_ring[1];
+                const int rw = menu_ring[2], rh = menu_ring[3];
                 bool menu_redraw = ringmenu_take_dirty(g_menu);
                 if (mx != g_menu_rect[0] || my != g_menu_rect[1] ||
                     mw != g_menu_rect[2] || mh != g_menu_rect[3]) {
