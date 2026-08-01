@@ -2687,12 +2687,17 @@ static void freerange_regen_upload_step(FreedomState *st, FreedomFrameSet *frame
 }
 
 
-#define CURSOR_BUF 128            /* cursor buffer: blade + hilt */
+#define CURSOR_BUF 92             /* cursor buffer: blade + hilt */
 #define CURSOR_BALL_SIZE 72       /* hilt ball diameter */
 #define CURSOR_BALL_FRAMES 20
 #define CURSOR_TIP 2              /* streak point = hotspot (x = y) */
 #define STREAK_GAP 4.0f           /* float clearance between streak and ball */
 #define STREAK_BORDER 2.2f        /* dark rim width just inside the edge */
+#define STREAK_TAPER 0.90f        /* higher = more acute tip */
+#define STREAK_NOSE 5.5f          /* rounds the point off, in taper units */
+#define STREAK_R_TIP 10.0f        /* corner radius at the point */
+#define STREAK_R_HEEL 12.0f       /* corner radius where the flanks meet the ball */
+#define STREAK_SPAN 50.0f         /* how far round the ball the heels sit, degrees */
 
 static struct {
     struct wl_surface *surface;
@@ -2704,6 +2709,14 @@ static struct {
     bool ready;
 } g_ball_cursor;
 
+/* Intersect two inside-positive edge fields, rolling a circle of radius r
+   into the corner they form so it comes out rounded instead of sharp. */
+static inline float round_isect(float e1, float e2, float r) {
+    float u1 = fmaxf(r - e1, 0.0f);
+    float u2 = fmaxf(r - e2, 0.0f);
+    return fmaxf(fminf(e1, e2), r) - sqrtf(u1 * u1 + u2 * u2);
+}
+
 static void blade_render(void) {
     uint32_t *px = g_ball_cursor.blade;
     if (!px) return;
@@ -2712,8 +2725,17 @@ static void blade_render(void) {
     const float s2 = 0.70710678f;
     const float tipx = CURSOR_TIP + 0.5f, tipy = CURSOR_TIP + 0.5f;
     const float bc = (float)CURSOR_BUF - CURSOR_BALL_SIZE / 2.0f - 0.5f;
-    const float len = (bc - tipx) / s2;    
-    const float wend = CURSOR_BALL_SIZE / 2.0f - 1.0f;  
+    const float len = (bc - tipx) / s2;
+    const float arcr = CURSOR_BALL_SIZE / 2.0f - 1.0f + STREAK_GAP;
+
+    /* The heels are placed on the ball's clearance arc, STREAK_SPAN off the
+       axis; the taper is then scaled to pass through them, so the base always
+       lands on the arc instead of sailing past the ball. */
+    const float span = STREAK_SPAN * PI / 180.0f;
+    const float heel_t = len - arcr * cosf(span);
+    const float heel_s = arcr * sinf(span);
+    const float wend = heel_s / powf((heel_t + STREAK_NOSE) /
+                                     (len + STREAK_NOSE), STREAK_TAPER);
 
     float lx3 = -0.3f, ly3 = -0.5f, lz3 = 1.0f;
     float il = 1.0f / sqrtf(lx3 * lx3 + ly3 * ly3 + lz3 * lz3);
@@ -2727,12 +2749,14 @@ static void blade_render(void) {
             float s = (rx - ry) * s2;      
             if (t < -0.8f || t > len) continue;
             float tt = t < 0.0f ? 0.0f : t;
-            float w = wend * powf(tt / len, 0.55f);
+            float w = wend * powf((tt + STREAK_NOSE) / (len + STREAK_NOSE),
+                                  STREAK_TAPER);
 
             float bdx = (float)x - bc, bdy = (float)y - bc;
-            float e = w - fabsf(s);
-            float eb = sqrtf(bdx * bdx + bdy * bdy) - (wend + STREAK_GAP);
-            if (eb < e) e = eb;
+            float e = round_isect(w - fabsf(s), t + 0.8f, STREAK_R_TIP);
+            if (heel_t - t < e) e = heel_t - t;   /* stop at the heels */
+            float eb = sqrtf(bdx * bdx + bdy * bdy) - arcr;
+            e = round_isect(e, eb, STREAK_R_HEEL);
             float cov = e + 0.5f;
             if (cov <= 0.0f) continue;
             if (cov > 1.0f) cov = 1.0f;
