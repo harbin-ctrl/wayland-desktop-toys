@@ -117,6 +117,12 @@ struct RingMenu {
     float rc;       // radius the content centers sit on
     int size;       // pixel buffer is size x size, menu centered in it
     uint32_t *pix;  // rendered menu, straight-alpha RGBA
+    // The ring itself costs a sqrt + atan2 per pixel but only changes when
+    // the highlight moves, so it is kept apart from the content drawn over
+    // it: callers that repaint on every pointer motion (a colour field being
+    // scrubbed, say) then pay for the content alone.
+    uint32_t *bg;
+    int bg_highlight;   // highlight bg was built for, -2 when unbuilt
 
     bool open;
     bool dirty;
@@ -332,12 +338,12 @@ static void rm_draw_led(RingMenu *m, float lx, float ly, bool on) {
     }
 }
 
-static void rm_render(RingMenu *m) {
+static void rm_render_bg(RingMenu *m, uint32_t *dst) {
     float c = m->size / 2.0f;
     float half = RM_PI / (float)m->count;
 
     for (int y = 0; y < m->size; y++) {
-        uint32_t *row = m->pix + (size_t)y * m->size;
+        uint32_t *row = dst + (size_t)y * m->size;
         float fy = (float)y + 0.5f - c;
         for (int x = 0; x < m->size; x++) {
             float fx = (float)x + 0.5f - c;
@@ -376,6 +382,22 @@ static void rm_render(RingMenu *m) {
             uint8_t out[4] = {(uint8_t)cr, (uint8_t)cg, (uint8_t)cb, 0};
             row[x] = rm_pack(out, (uint8_t)(ca * cov));
         }
+    }
+}
+
+static void rm_render(RingMenu *m) {
+    float c = m->size / 2.0f;
+    float half = RM_PI / (float)m->count;
+    size_t px_bytes = (size_t)m->size * m->size * 4;
+
+    if (m->bg) {
+        if (m->bg_highlight != m->highlight) {
+            rm_render_bg(m, m->bg);
+            m->bg_highlight = m->highlight;
+        }
+        memcpy(m->pix, m->bg, px_bytes);
+    } else {
+        rm_render_bg(m, m->pix);
     }
 
     // Content, centered on each wedge's bisector at radius rc.
@@ -517,6 +539,9 @@ RingMenu *ringmenu_create(const RingMenuItem *items, int count) {
         ringmenu_destroy(m);
         return NULL;
     }
+    // Optional: rm_render falls back to drawing the ring straight into pix.
+    m->bg = malloc((size_t)m->size * m->size * 4);
+    m->bg_highlight = -2;
     return m;
 }
 
@@ -524,6 +549,7 @@ void ringmenu_destroy(RingMenu *m) {
     if (!m) return;
     for (int i = 0; i < m->count; i++) free(m->items[i].image);
     free(m->pix);
+    free(m->bg);
     free(m);
 }
 
