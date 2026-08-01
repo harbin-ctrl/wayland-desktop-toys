@@ -97,6 +97,14 @@ static uint32_t *g_menu_scratch = NULL;
 static size_t g_menu_scratch_cap = 0;
 static int g_menu_rect[4] = {0, 0, -1, -1};
 static unsigned int g_menu_tex = 0;
+static int g_menu_tex_w = 0, g_menu_tex_h = 0;
+/* The colour field costs a per-pixel atan2 + HSL over its whole disc, but it
+   only depends on the slot and the menu's placement - not on the pointer. It
+   is rendered once per slot and composited from here on every later frame. */
+static uint32_t *g_field_cache = NULL;
+static size_t g_field_cache_cap = 0;
+static int g_field_cache_slot = -1;
+static int g_field_cache_rect[4] = {0, 0, -1, -1};
 static bool g_menu_was_open = false;
 static int g_picker_slot = -1;      
 static bool g_picker_locked = false;
@@ -5539,10 +5547,44 @@ static int run_freerange_wayland(bool start_muted) {
                 if (menu_redraw) {
                     size_t need = (size_t)mw * mh;
                     if (g_menu_scratch && need <= g_menu_scratch_cap) {
-                        memset(g_menu_scratch, 0, (size_t)mw * mh * 4);
+                        bool field_cached = false;
                         if (g_picker_slot >= 0) {
-                            ringmenu_field_draw(g_menu, g_picker_slot,
-                                                g_menu_scratch, mw, mh, mx, my);
+                            if (g_field_cache_slot != g_picker_slot ||
+                                g_field_cache_rect[0] != mx ||
+                                g_field_cache_rect[1] != my ||
+                                g_field_cache_rect[2] != mw ||
+                                g_field_cache_rect[3] != mh ||
+                                g_field_cache_cap < need) {
+                                if (g_field_cache_cap < need) {
+                                    uint32_t *grown = realloc(g_field_cache, need * 4);
+                                    if (grown) {
+                                        g_field_cache = grown;
+                                        g_field_cache_cap = need;
+                                    }
+                                }
+                                if (g_field_cache_cap >= need) {
+                                    memset(g_field_cache, 0, need * 4);
+                                    ringmenu_field_draw(g_menu, g_picker_slot,
+                                                        g_field_cache, mw, mh, mx, my);
+                                    g_field_cache_slot = g_picker_slot;
+                                    g_field_cache_rect[0] = mx;
+                                    g_field_cache_rect[1] = my;
+                                    g_field_cache_rect[2] = mw;
+                                    g_field_cache_rect[3] = mh;
+                                }
+                            }
+                            if (g_field_cache_slot == g_picker_slot &&
+                                g_field_cache_cap >= need) {
+                                memcpy(g_menu_scratch, g_field_cache, need * 4);
+                                field_cached = true;
+                            }
+                        }
+                        if (!field_cached) {
+                            memset(g_menu_scratch, 0, need * 4);
+                            if (g_picker_slot >= 0) {
+                                ringmenu_field_draw(g_menu, g_picker_slot,
+                                                    g_menu_scratch, mw, mh, mx, my);
+                            }
                         }
                         ringmenu_draw(g_menu, g_menu_scratch, mw, mh, mx, my);
                         for (size_t i = 0; i < (size_t)mw * mh; i++) {
@@ -5556,7 +5598,15 @@ static int run_freerange_wayland(bool start_muted) {
                             g_menu_scratch[i] = r | (g_val << 8) | (b << 16) | (a << 24);
                         }
                         glBindTexture(GL_TEXTURE_2D, g_menu_tex);
-                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, mw, mh, 0, GL_RGBA, GL_UNSIGNED_BYTE, g_menu_scratch);
+                        if (mw == g_menu_tex_w && mh == g_menu_tex_h) {
+                            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mw, mh,
+                                            GL_RGBA, GL_UNSIGNED_BYTE, g_menu_scratch);
+                        } else {
+                            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, mw, mh, 0,
+                                         GL_RGBA, GL_UNSIGNED_BYTE, g_menu_scratch);
+                            g_menu_tex_w = mw;
+                            g_menu_tex_h = mh;
+                        }
                     }
                 }
                 float x0 = 2.f * mx / st.width - 1.f;
@@ -5767,6 +5817,7 @@ static int run_freerange_wayland(bool start_muted) {
     shutdown_audio();
     if (g_menu) { ringmenu_destroy(g_menu); g_menu = NULL; }
     if (g_menu_scratch) { free(g_menu_scratch); g_menu_scratch = NULL; }
+    if (g_field_cache) { free(g_field_cache); g_field_cache = NULL; g_field_cache_cap = 0; }
     free(st.regen_unit_done_storage);
     free(st.regen_order_storage);
     free(st.regen_thread_storage);
