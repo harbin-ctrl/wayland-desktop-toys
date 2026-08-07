@@ -119,10 +119,38 @@ static int g_menu_tex_slot = -1;         /* whose field the texture holds */
 static uint32_t *g_upload_staging = NULL;
 static size_t g_upload_cap = 0;
 static bool g_menu_was_open = false;
-static int g_picker_slot = -1;      
+static int g_picker_slot = -1;
 static bool g_picker_locked = false;
 static uint8_t g_picker_original[3];
 static uint8_t g_picker_color[3];
+/*
+ * A right-button release while the ring menu is open ordinarily means one
+ * thing: commit whatever slot the pointer is over. But labwc can also send
+ * a right RELEASED that was never a real user decision at all -- one it
+ * synthesises to correct a press it delivered live and then had to take
+ * back, the moment a right-click-drag gets promoted to the compositor's own
+ * screen-bar menu. Wayland gives no way to tell the two apart from the
+ * button event alone; both look identical.
+ *
+ * What does differ is what follows it. A synthetic correction is always
+ * paired with a real wl_pointer.leave for this surface -- labwc clears
+ * pointer focus right after sending it, because the pointer now belongs to
+ * its own menu -- and the two arrive back to back, in the same read of the
+ * Wayland socket, well before freerange_pump_events() returns. A genuine
+ * user release that lands on a slot is not followed by a leave at all; the
+ * pointer is still sitting right there.
+ *
+ * So the release is deferred rather than acted on immediately: this flag
+ * records that one is pending, and freerange_resolve_pending_ring_release()
+ * -- called once per frame, after the whole batch a pump can see has been
+ * drained -- decides commit or cancel based on whether a leave arrived
+ * alongside it. Left unset, and the deferred release resolves as an
+ * ordinary commit; a real drag that ends by leaving the surface entirely
+ * (no release at all yet) is handled separately, directly in
+ * freerange_pointer_leave().
+ */
+static bool g_ring_right_release_pending = false;
+static bool g_ring_pointer_left_pending = false;
 
 #include <wayland-client.h>
 #include <wayland-egl.h>
@@ -3966,6 +3994,36 @@ static void freerange_pointer_leave(void *data, struct wl_pointer *pointer,
     (void)pointer;
     (void)serial;
     (void)surface;
+
+    if (!g_menu || !ringmenu_is_open(g_menu)) {
+        return;
+    }
+
+    /*
+     * A right release that arrived just before this, in the same batch, is
+     * still waiting on freerange_resolve_pending_ring_release() to decide
+     * what it meant -- flag that a leave came with it, so that function
+     * cancels instead of committing. See g_ring_right_release_pending's own
+     * comment for why the decision has to wait this long.
+     *
+     * If no release is pending, the pointer has left mid-hold, with the
+     * button (if any) still down and nothing decided yet -- a genuine right
+     * drag that swept off the edge of the window, or a left-button drag
+     * still holding the colour picker open. Either way the menu has no
+     * pointer to react to any more, so it cancels immediately rather than
+     * being left open with no way to close it until the pointer happens to
+     * come back.
+     */
+    g_ring_pointer_left_pending = true;
+    if (!g_ring_right_release_pending) {
+        ringmenu_button(g_menu, RINGMENU_BTN_MIDDLE, true);
+        if (g_picker_slot >= 0) {
+            poingo_menu_set_drop(g_picker_slot, g_picker_original);
+            g_picker_slot = -1;
+            g_picker_locked = false;
+        }
+        poingo_menu_sync_drops();
+    }
 }
 
 static void freerange_pointer_motion(void *data, struct wl_pointer *pointer,
@@ -4143,6 +4201,116 @@ static void freerange_release_grab(FreedomState *st) {
     }
 }
 
+/*
+ * Everything a resolved ring-menu button event does, whether the release
+ * was acted on immediately (left, middle, right-press) or held back and
+ * decided later by freerange_resolve_pending_ring_release(). Pulled out of
+ * freerange_pointer_button() so the deferred right-release path -- see
+ * g_ring_right_release_pending's comment -- can call exactly the same
+ * logic a normal, immediate button event would have.
+ */
+static void freerange_ring_menu_button(FreedomState *st, int rbtn, bool pressed) {
+    if (!pressed && g_picker_slot >= 0 &&
+        (rbtn == RINGMENU_BTN_LEFT || rbtn == RINGMENU_BTN_RIGHT)) {
+        int slot = g_picker_slot;
+        g_picker_slot = -1;
+        g_picker_locked = false;
+        ringmenu_button(g_menu, rbtn, pressed);
+        uint8_t light_rgb[3], dark_rgb[3];
+        memcpy(light_rgb, g_color_light_rgb, 3);
+        memcpy(dark_rgb, g_color_dark_rgb, 3);
+        if (slot == 0) memcpy(light_rgb, g_picker_color, 3);
+        else memcpy(dark_rgb, g_picker_color, 3);
+        freerange_color_set_and_regen(st, light_rgb, dark_rgb);
+        poingo_menu_sync_drops();
+        return;
+    }
+
+    int result = ringmenu_button(g_menu, rbtn, pressed);
+    if (result >= 0 && g_picker_slot >= 0) {
+        poingo_menu_set_drop(g_picker_slot, g_picker_original);
+        g_picker_slot = -1;
+        g_picker_locked = false;
+    }
+    if (result > 0) {
+        if (result == POINGO_MENU_NOSTALGIA) {
+            const uint8_t light_rgb[3] = { 255, 255, 255 };
+            const uint8_t dark_rgb[3] = { 255, 0, 0 };
+            set_a_mode_enabled(true);
+            freerange_color_set_and_regen(st, light_rgb, dark_rgb);
+        } else if (result == POINGO_MENU_POINGO) {
+            const uint8_t light_rgb[3] = { COLOR_LIGHT_R, COLOR_LIGHT_G, COLOR_LIGHT_B };
+            const uint8_t dark_rgb[3] = { COLOR_DARK_R, COLOR_DARK_G, COLOR_DARK_B };
+            set_a_mode_enabled(false);
+            freerange_color_set_and_regen(st, light_rgb, dark_rgb);
+        } else if (result == POINGO_MENU_NEWCOLOR) {
+            freerange_color_randomize_and_regen(st);
+        } else if (result == POINGO_MENU_MUTE) {
+            toggle_master_mute();
+        } else if (result == POINGO_MENU_GHOST) {
+            st->ghost_mode = true;
+        } else if (result == POINGO_MENU_QUIT) {
+            freerange_request_graceful_shutdown(st);
+        }
+        poingo_menu_sync_drops();
+    }
+}
+
+/*
+ * The FreedomState is a single, stable instance for the process's whole
+ * run (main() keeps it on its own stack frame and every callback is reached
+ * through the same &st), so holding a raw pointer to it across the short
+ * window between a deferred right release and its resolution next frame is
+ * safe -- there is only ever one, and it outlives every event this loop
+ * will ever dispatch.
+ */
+static FreedomState *g_ring_deferred_st = NULL;
+
+/*
+ * Decides a right-button release that freerange_pointer_button() held back
+ * instead of acting on immediately, once the whole event batch that could
+ * contain an accompanying leave has been drained. See
+ * g_ring_right_release_pending's comment for why the decision cannot be
+ * made any earlier than this. A no-op when nothing is pending, which is
+ * every call after an ordinary frame with no ring-menu right release in it.
+ */
+static void freerange_resolve_pending_ring_release(void) {
+    if (!g_ring_right_release_pending) {
+        return;
+    }
+    bool cancel = g_ring_pointer_left_pending;
+    FreedomState *st = g_ring_deferred_st;
+    g_ring_right_release_pending = false;
+    g_ring_pointer_left_pending = false;
+    g_ring_deferred_st = NULL;
+
+    if (!st || !g_menu || !ringmenu_is_open(g_menu)) {
+        return;
+    }
+
+    if (cancel) {
+        /*
+         * A leave arrived in the same batch as the release: this was
+         * labwc correcting a press it delivered live and then had to
+         * withdraw, not a real user decision, and committing whatever the
+         * pointer happened to be over the instant it was withdrawn is
+         * exactly the bug this whole deferral exists to avoid. Cancel
+         * through the ring menu's own supported path instead of treating
+         * the release as a selection.
+         */
+        ringmenu_button(g_menu, RINGMENU_BTN_MIDDLE, true);
+        if (g_picker_slot >= 0) {
+            poingo_menu_set_drop(g_picker_slot, g_picker_original);
+            g_picker_slot = -1;
+            g_picker_locked = false;
+        }
+        poingo_menu_sync_drops();
+        return;
+    }
+
+    freerange_ring_menu_button(st, RINGMENU_BTN_RIGHT, false);
+}
+
 static void freerange_pointer_button(void *data, struct wl_pointer *pointer,
                                    uint32_t serial, uint32_t time, uint32_t button,
                                    uint32_t state) {
@@ -4169,50 +4337,21 @@ static void freerange_pointer_button(void *data, struct wl_pointer *pointer,
         if (rbtn >= 0) {
             bool pressed = (state == WL_POINTER_BUTTON_STATE_PRESSED);
 
-            if (!pressed && g_picker_slot >= 0 &&
-                (rbtn == RINGMENU_BTN_LEFT || rbtn == RINGMENU_BTN_RIGHT)) {
-                int slot = g_picker_slot;
-                g_picker_slot = -1;
-                g_picker_locked = false;
-                ringmenu_button(g_menu, rbtn, pressed); 
-                uint8_t light_rgb[3], dark_rgb[3];
-                memcpy(light_rgb, g_color_light_rgb, 3);
-                memcpy(dark_rgb, g_color_dark_rgb, 3);
-                if (slot == 0) memcpy(light_rgb, g_picker_color, 3);
-                else memcpy(dark_rgb, g_picker_color, 3);
-                freerange_color_set_and_regen(st, light_rgb, dark_rgb);
-                poingo_menu_sync_drops();
+            /*
+             * Only a right release is ever at risk of being labwc's
+             * synthetic correction rather than a real one -- see
+             * g_ring_right_release_pending's comment -- so only that case
+             * is held back. Left and middle are unaffected: nothing about
+             * the compositor's screen-bar promotion touches them.
+             */
+            if (rbtn == RINGMENU_BTN_RIGHT && !pressed) {
+                g_ring_right_release_pending = true;
+                g_ring_pointer_left_pending = false;
+                g_ring_deferred_st = st;
                 return;
             }
 
-            int result = ringmenu_button(g_menu, rbtn, pressed);
-            if (result >= 0 && g_picker_slot >= 0) {
-                poingo_menu_set_drop(g_picker_slot, g_picker_original);
-                g_picker_slot = -1;
-                g_picker_locked = false;
-            }
-            if (result > 0) {
-                if (result == POINGO_MENU_NOSTALGIA) {
-                    const uint8_t light_rgb[3] = { 255, 255, 255 };
-                    const uint8_t dark_rgb[3] = { 255, 0, 0 };
-                    set_a_mode_enabled(true);
-                    freerange_color_set_and_regen(st, light_rgb, dark_rgb);
-                } else if (result == POINGO_MENU_POINGO) {
-                    const uint8_t light_rgb[3] = { COLOR_LIGHT_R, COLOR_LIGHT_G, COLOR_LIGHT_B };
-                    const uint8_t dark_rgb[3] = { COLOR_DARK_R, COLOR_DARK_G, COLOR_DARK_B };
-                    set_a_mode_enabled(false);
-                    freerange_color_set_and_regen(st, light_rgb, dark_rgb);
-                } else if (result == POINGO_MENU_NEWCOLOR) {
-                    freerange_color_randomize_and_regen(st);
-                } else if (result == POINGO_MENU_MUTE) {
-                    toggle_master_mute();
-                } else if (result == POINGO_MENU_GHOST) {
-                    st->ghost_mode = true;
-                } else if (result == POINGO_MENU_QUIT) {
-                    freerange_request_graceful_shutdown(st);
-                }
-                poingo_menu_sync_drops();
-            }
+            freerange_ring_menu_button(st, rbtn, pressed);
         }
         return;
     }
@@ -5057,6 +5196,14 @@ static int run_freerange_wayland(bool start_muted) {
             pump_enter_ns = (uint64_t)_pe.tv_sec * 1000000000ULL + (uint64_t)_pe.tv_nsec;
         }
         freerange_pump_events(st.display, 20);
+        /*
+         * After the pump, not inside any pointer callback: this is the
+         * first point at which a leave that arrived alongside a deferred
+         * right release (see g_ring_right_release_pending) is guaranteed
+         * to have already been seen, whichever order the two callbacks ran
+         * in within this batch.
+         */
+        freerange_resolve_pending_ring_release();
         tick_start = poingo_perf_counter();
         if (g_freerange_quit_requested) {
             st.running = false;
