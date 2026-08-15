@@ -1,4 +1,8 @@
-CC ?= gcc
+ifeq ($(origin CC),default)
+CC := ccache gcc
+endif
+CCACHE_PREFIX ?= distcc
+export CC CCACHE_PREFIX
 TARGETS := poingo icon_maker
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
 DESKTOP_TOYS_DIR ?= $(CURDIR)/../desktop-toys-packaging

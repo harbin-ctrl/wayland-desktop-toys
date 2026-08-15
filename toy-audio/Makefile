@@ -1,4 +1,8 @@
-CC ?= gcc
+ifeq ($(origin CC),default)
+CC := ccache gcc
+endif
+CCACHE_PREFIX ?= distcc
+export CC CCACHE_PREFIX
 AR ?= ar
 CFLAGS ?= -O2
 CFLAGS += -std=c11 -Wall -Wextra -Wshadow -pedantic -fPIC

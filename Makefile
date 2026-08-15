@@ -3,6 +3,15 @@
 # on its own, so a toy still builds standalone, but building libs up front
 # keeps a parallel (make -jN) build correct and free of duplicate work.
 
+ifeq ($(origin CC),default)
+CC := ccache gcc
+endif
+ifeq ($(origin CXX),default)
+CXX := ccache g++
+endif
+CCACHE_PREFIX ?= distcc
+export CC CXX CCACHE_PREFIX
+
 # Shared libraries (built here; toys reference them as ../<name> siblings).
 # desktop-toys-packaging ships only assets + install.mk, so it is not built.
 LIBS := toy-audio ring-menu third_party/lodepng shared

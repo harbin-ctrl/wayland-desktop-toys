@@ -1,4 +1,8 @@
-CC ?= gcc
+ifeq ($(origin CC),default)
+CC := ccache gcc
+endif
+CCACHE_PREFIX ?= distcc
+export CC CCACHE_PREFIX
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
 TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
 DESKTOP_TOYS_DIR ?= $(CURDIR)/../desktop-toys-packaging

@@ -1,6 +1,10 @@
 .DEFAULT_GOAL := all
 
-CC     ?= gcc
+ifeq ($(origin CC),default)
+CC := ccache gcc
+endif
+CCACHE_PREFIX ?= distcc
+export CC CCACHE_PREFIX
 CFLAGS := -O3 -ffast-math -Wall -pthread $(shell pkg-config --cflags wayland-client wayland-egl egl glesv2)
 LIBS   := $(shell pkg-config --libs wayland-client wayland-egl egl glesv2) -lm -pthread
 
