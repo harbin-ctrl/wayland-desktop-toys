@@ -4680,7 +4680,10 @@ static const struct wl_registry_listener freerange_registry_listener = {
 
 static void freerange_signal_handler(int signum) {
     (void)signum;
-    g_freerange_quit_requested = 1;
+    /* First signal asks for the same graceful exit as Q or the menu, so the
+     * ball fades out and the audio rides down with it. A second one means
+     * whoever sent the first has run out of patience: drop the fade and go. */
+    g_freerange_quit_requested = g_freerange_quit_requested ? 2 : 1;
 }
 typedef struct {
     bool     ready;
@@ -5233,8 +5236,12 @@ static int run_freerange_wayland(bool start_muted) {
         freerange_resolve_pending_ring_release();
         uint64_t tick_start = poingo_perf_counter();
         if (unlikely(g_freerange_quit_requested)) {
-            st.running = false;
-            break;
+            if (g_freerange_quit_requested > 1) {
+                st.running = false;
+                break;
+            }
+            /* Re-entry is guarded inside, so calling it every tick is fine. */
+            freerange_request_graceful_shutdown(&st);
         }
 
         uint64_t current_counter = poingo_perf_counter();
@@ -5302,7 +5309,11 @@ static int run_freerange_wayland(bool start_muted) {
         }
 
         if (g_freerange_quit_requested) {
-            st.running = false;
+            if (g_freerange_quit_requested > 1) {
+                st.running = false;
+            } else {
+                freerange_request_graceful_shutdown(&st);
+            }
         }
         if (!st.running) {
             break;
