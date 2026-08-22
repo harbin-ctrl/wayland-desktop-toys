@@ -1,0 +1,16 @@
+#!/bin/sh
+# Poingo's PipeWire channel-route audit goes to stderr, which a panel or menu
+# launch throws away. The stereo-reversal fault is rare and cannot be
+# reproduced on demand, so the log has to already be running when it happens.
+# Keeps one previous session, then execs the real binary.
+dir="${XDG_CACHE_HOME:-$HOME/.cache}/poingo"
+mkdir -p "$dir" 2>/dev/null
+log="$dir/session.log"
+if [ -f "$log" ] && [ "$(wc -c <"$log" 2>/dev/null || echo 0)" -gt 262144 ]; then
+    mv -f "$log" "$log.1" 2>/dev/null
+fi
+{
+    echo "=== $(date -Is) poingo start ==="
+    command -v pw-link >/dev/null 2>&1 && pw-link -l 2>/dev/null | sed 's/^/graph: /'
+} >>"$log" 2>/dev/null
+exec poingo "$@" 2>>"$log"

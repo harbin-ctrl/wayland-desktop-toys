@@ -72,6 +72,7 @@ run: poingo
 install: poingo icon_maker icons desktop-toys-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"
 	install -m 755 poingo "$(DESTDIR)$(PREFIX)/bin/poingo"
+	install -m 755 poingo-logged "$(DESTDIR)$(PREFIX)/bin/poingo-logged"
 	install -d "$(DESTDIR)$(PREFIX)/share/applications"
 	install -m 644 poingo.desktop "$(DESTDIR)$(PREFIX)/share/applications/poingo.desktop"
 	install -d "$(DESTDIR)$(PREFIX)/share/icons/hicolor"
@@ -85,6 +86,7 @@ install: poingo icon_maker icons desktop-toys-install
 install-user: poingo icon_maker icons desktop-toys-install-user
 	install -d "$(HOME)/.local/bin"
 	install -m 755 poingo "$(HOME)/.local/bin/poingo"
+	install -m 755 poingo-logged "$(HOME)/.local/bin/poingo-logged"
 	install -d "$(HOME)/.local/share/applications"
 	install -m 644 poingo.desktop "$(HOME)/.local/share/applications/poingo.desktop"
 	install -d "$(HOME)/.local/share/icons/hicolor"
