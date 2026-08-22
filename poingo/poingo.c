@@ -973,6 +973,20 @@ static bool audio_is_perceptually_quiet(void) {
     return quiet;
 }
 
+/* Ride the mixer down alongside the ball's own fade, so the sound leaves with
+ * the picture. Without this a bounce landing just before the quit keeps ringing
+ * for well over a second after the ball is gone -- its tail is far longer than
+ * the fade -- and the shutdown sits there waiting for it to decay. */
+static void audio_begin_shutdown_fade(float seconds) {
+    if (!audio_device_open) {
+        return;
+    }
+
+    audio_lock();
+    toy_mixer_begin_fade_out(&g_mixer, seconds);
+    audio_unlock();
+}
+
 
 static void notify_volume_changed(void);
 static void adjust_master_volume(float delta);
@@ -3036,6 +3050,7 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
         st->shutdown_pending = true;
         st->shutdown_start_ticks = poingo_ticks_ms();
         st->shutdown_last_check_ticks = st->shutdown_start_ticks;
+        audio_begin_shutdown_fade(POINGO_EXIT_FADE_SECONDS);
         return;
     }
     if (st->color_regen_mode == BALL_REGEN_CLEAR && st->color_regen_active) {
@@ -3053,6 +3068,7 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
     st->exit_fade = POINGO_EXIT_FADE_SECONDS;
     st->shutdown_start_ticks = poingo_ticks_ms();
     st->shutdown_last_check_ticks = st->shutdown_start_ticks;
+    audio_begin_shutdown_fade(POINGO_EXIT_FADE_SECONDS);
 }
 
 static void freerange_color_set_and_regen(FreedomState *st,
