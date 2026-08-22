@@ -18,8 +18,14 @@
 #define TOY_AUDIO_STREAM_DESCRIPTION_MAX 128
 #define TOY_AUDIO_NSEC_PER_SEC 1000000000ULL
 #define TOY_AUDIO_START_TIMEOUT_SEC 5
-#define TOY_AUDIO_GRAPH_PORTS_MAX 32
-#define TOY_AUDIO_GRAPH_LINKS_MAX 16
+/* These track the whole graph, not just our own objects, because a link names
+ * its endpoints by id and either end may be announced before we know which node
+ * is ours. A busy session -- browser, notifications, several sinks and their
+ * monitor ports -- runs to well over a hundred ports, and once the table is
+ * full our own ports cannot be recorded, which silently blinds the channel
+ * audit below rather than failing loudly. Size these so that cannot happen. */
+#define TOY_AUDIO_GRAPH_PORTS_MAX 512
+#define TOY_AUDIO_GRAPH_LINKS_MAX 256
 
 typedef struct {
     uint32_t id;
@@ -48,6 +54,7 @@ struct ToyAudioStream {
     uint32_t sample_rate;
     uint32_t channels;
     char name[TOY_AUDIO_STREAM_NAME_MAX];
+    bool graph_incomplete_reported;
     char description[TOY_AUDIO_STREAM_DESCRIPTION_MAX];
     bool pipewire_initialized;
     atomic_bool streaming;
@@ -158,6 +165,19 @@ static void audit_graph(ToyAudioStream *audio) {
         ToyAudioGraphPort *source = find_graph_port(audio, link->output_port);
         ToyAudioGraphPort *destination = find_graph_port(audio, link->input_port);
         if (!source || !destination) {
+            /* Our own link, but an endpoint is missing from the port table, so
+             * the channel check below cannot run. Say so: staying quiet here is
+             * indistinguishable from a clean route, and that is exactly the
+             * case a channel-swap investigation must not confuse. */
+            if (!audio->graph_incomplete_reported) {
+                audio->graph_incomplete_reported = true;
+                fprintf(stderr,
+                        "%s: WARNING: cannot audit channel route, link %u "
+                        "endpoint not in port table (out %u %s, in %u %s)\n",
+                        audio->name, link->id, link->output_port,
+                        source ? "known" : "MISSING", link->input_port,
+                        destination ? "known" : "MISSING");
+            }
             continue;
         }
         fprintf(stderr,
