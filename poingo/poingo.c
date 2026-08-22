@@ -22,6 +22,8 @@
 #include "toy_audio_stream.h"
 #include <stdatomic.h>
 
+#define likely(x)      __builtin_expect(!!(x), 1)
+#define unlikely(x)    __builtin_expect(!!(x), 0)
 
 static inline uint64_t poingo_perf_freq(void) { return 1000000000ULL; }
 static inline uint64_t poingo_perf_counter(void) {
@@ -61,12 +63,12 @@ static pthread_t *poingo_thread_create(PoingoThreadFn fn, const char *name,
                                        void *data) {
     (void)name;
     PoingoThreadTramp *tr = malloc(sizeof(*tr));
-    if (!tr) return NULL;
+    if (unlikely(!tr)) return NULL;
     tr->fn = fn;
     tr->data = data;
     pthread_t *t = malloc(sizeof(pthread_t));
-    if (!t) { free(tr); return NULL; }
-    if (pthread_create(t, NULL, poingo_thread_trampoline, tr) != 0) {
+    if (unlikely(!t)) { free(tr); return NULL; }
+    if (unlikely(pthread_create(t, NULL, poingo_thread_trampoline, tr) != 0)) {
         free(t);
         free(tr);
         return NULL;
@@ -303,11 +305,8 @@ static uint32_t gcd_u32(uint32_t a, uint32_t b);
 static void regen_make_shuffled_order(uint32_t *order, uint32_t total);
 static inline float clamp_freerange_ball_scale(float value);
 static float remap_normalized_scale_to_sound(float normalized_scale);
-void mark_sounds_dirty(float size_scale);
-static inline void window_coords_to_render(int logical_x, int logical_y,
-                                           int logical_w, int logical_h,
-                                           int render_w, int render_h,
-                                           int *out_x, int *out_y);
+static void mark_sounds_dirty(float size_scale);
+
 
 
 #define KEY_REPEAT_INITIAL_DELAY 0.50f   // Half second before first repeat
@@ -505,8 +504,8 @@ static bool ensure_sphere_pixel_cache(int size) {
     light_z *= inv_light_len;
 
     float radius = size / 2.0f;
-    float cx = radius - 0.5f;
-    float cy = radius - 0.5f;
+    float cx, cy;
+    cx = cy = radius - 0.5f;
     float inv_radius = (radius != 0.0f) ? (1.0f / radius) : 0.0f;
 
     /* A pixel covers about (radius - dist) + 0.5 of the disc: one whose centre
@@ -679,9 +678,8 @@ static uint8_t* generate_shadow_pixels(int shadow_size, int * restrict out_width
         return NULL;
     }
 
-    float cx = size / 2.0f;
-    float cy = size / 2.0f;
-    float shadow_radius = size / 2.0f;
+    float cx, cy, shadow_radius;
+    cx = cy = shadow_radius = size / 2.0f;
     const float max_alpha = 0.4f;
 
     const float inner_threshold = shadow_radius * 0.7f;
@@ -982,33 +980,7 @@ static void set_master_mute(bool mute);
 static void toggle_master_mute(void);
 static void update_volume_hud(float delta_seconds);
 
-static inline void window_coords_to_render(int logical_x, int logical_y,
-                                           int logical_w, int logical_h,
-                                           int render_w, int render_h,
-                                           int *out_x, int *out_y) {
-    float scale_x = (logical_w > 0) ? ((float)render_w / (float)logical_w) : 1.0f;
-    float scale_y = (logical_h > 0) ? ((float)render_h / (float)logical_h) : 1.0f;
-    if (out_x) {
-        *out_x = (int)lroundf((float)logical_x * scale_x);
-    }
-    if (out_y) {
-        *out_y = (int)lroundf((float)logical_y * scale_y);
-    }
-}
 
-static inline void render_coords_to_window(int render_x, int render_y,
-                                           int logical_w, int logical_h,
-                                           int render_w, int render_h,
-                                           int *out_x, int *out_y) {
-    float inv_scale_x = (render_w > 0) ? ((float)logical_w / (float)render_w) : 1.0f;
-    float inv_scale_y = (render_h > 0) ? ((float)logical_h / (float)render_h) : 1.0f;
-    if (out_x) {
-        *out_x = (int)lroundf((float)render_x * inv_scale_x);
-    }
-    if (out_y) {
-        *out_y = (int)lroundf((float)render_y * inv_scale_y);
-    }
-}
 
 static float g_volume_hud_time = 0.0f;
 static float g_volume_hud_alpha = 0.0f;
@@ -1098,7 +1070,7 @@ static bool init_audio(bool start_muted) {
         .userdata = NULL,
     };
     g_audio_stream = toy_audio_stream_start(&stream_config);
-    if (!g_audio_stream) {
+    if (unlikely(!g_audio_stream)) {
         fprintf(stderr,
                 "poingo: failed to start PipeWire audio; quitting\n");
         shutdown_audio();
@@ -1107,7 +1079,7 @@ static bool init_audio(bool start_muted) {
     return true;
 }
 
-bool play_bounce_sound(int volume, float pan) {
+static bool play_bounce_sound(int volume, float pan) {
     float size_scale = fmaxf(audio_state.current_size_scale, 0.05f);
 
     if (audio_state.bounce.dirty) {
@@ -1487,7 +1459,7 @@ static float remap_normalized_scale_to_sound(float normalized_scale) {
     return rescaled;
 }
 
-void mark_sounds_dirty(float size_scale) {
+static void mark_sounds_dirty(float size_scale) {
     audio_state.bounce.dirty = true;
     audio_state.pending_size_scale = fmaxf(size_scale, 0.01f);
 }
@@ -1513,7 +1485,7 @@ static bool is_mouse_over_ball(int mouse_x, int mouse_y, float ball_x, float bal
     return distance <= ball_radius;
 }
 
-void calculate_equilibrium_state(int window_w, int window_h,
+static void calculate_equilibrium_state(int window_w, int window_h,
                                  float gravity, float floor_y_norm,
                                  float target_peak_y,
                                  float *out_ball_y, float *out_vy,
@@ -2965,10 +2937,10 @@ static bool ball_cursor_create(struct wl_shm *shm, struct wl_compositor *composi
     size_t total = frame_bytes * CURSOR_BALL_FRAMES;
 
     int fd = memfd_create("poingo-cursor", MFD_CLOEXEC);
-    if (fd < 0) return false;
-    if (ftruncate(fd, (off_t)total) < 0) { close(fd); return false; }
+    if (unlikely(fd < 0)) return false;
+    if (unlikely(ftruncate(fd, (off_t)total) < 0)) { close(fd); return false; }
     void *data = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (data == MAP_FAILED) { close(fd); return false; }
+    if (unlikely(data == MAP_FAILED)) { close(fd); return false; }
 
     struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t)total);
     for (int f = 0; f < CURSOR_BALL_FRAMES; f++) {
@@ -3705,15 +3677,15 @@ static void freerange_update_input_region(struct wl_compositor *compositor,
         float dx = sqrtf(inside);
         int x = (int)floorf(ball_center_x - dx);
         int w = (int)ceilf(dx * 2.0f);
-        int h = step;
-        if (x < 0) {
+        if (unlikely(x < 0)) {
             w += x;
             x = 0;
         }
-        if (x + w > width) {
+        if (unlikely(x + w > width)) {
             w = width - x;
         }
-        if (w > 0) {
+        if (likely(w > 0)) {
+            int h = step;
             wl_region_add(region, x, y, w, h);
         }
         }
@@ -4203,11 +4175,11 @@ static void freerange_release_grab(FreedomState *st) {
                 float dy = (float)st->pointer_y - (float)st->mouse_history[oldest_valid_index].y;
                 float dt = (float)(current_time - st->mouse_history[oldest_valid_index].time);
                 if (dt > 0.001f) {
-                    float vx_pixels_per_ms = dx / dt;
-                    float vy_pixels_per_ms = dy / dt;
                     float total_distance = sqrtf(dx * dx + dy * dy);
                     float speed_pixels_per_ms = total_distance / dt;
                     if (speed_pixels_per_ms > 1.0f) {
+                        float vx_pixels_per_ms = dx / dt;
+                        float vy_pixels_per_ms = dy / dt;
                         float ms_to_frame_60fps = 16.67f;
                         float scale_factor_x = 2.0f * ms_to_frame_60fps;
                         float scale_factor_y = 1.0f * ms_to_frame_60fps;
@@ -5178,7 +5150,6 @@ static int run_freerange_wayland(bool start_muted) {
     double   cs_mean      = 0.0, cs_M2  = 0.0;
     uint64_t   fcb_report_at = poingo_perf_counter();
 
-    uint64_t  tick_start;
     double  prev_non_upload_ms  = 0.0;
     double  regen_ms_per_unit   = 0.0;
     bool    prev_regen_active   = false;
@@ -5244,8 +5215,8 @@ static int run_freerange_wayland(bool start_muted) {
          * in within this batch.
          */
         freerange_resolve_pending_ring_release();
-        tick_start = poingo_perf_counter();
-        if (g_freerange_quit_requested) {
+        uint64_t tick_start = poingo_perf_counter();
+        if (unlikely(g_freerange_quit_requested)) {
             st.running = false;
             break;
         }
