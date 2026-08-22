@@ -507,8 +507,15 @@ static bool ensure_sphere_pixel_cache(int size) {
     float radius = size / 2.0f;
     float cx = radius - 0.5f;
     float cy = radius - 0.5f;
-    float radius_sq = radius * radius;
     float inv_radius = (radius != 0.0f) ? (1.0f / radius) : 0.0f;
+
+    /* A pixel covers about (radius - dist) + 0.5 of the disc: one whose centre
+     * sits exactly on the circle is half covered, not empty. The ramp straddles
+     * the silhouette, so the scanned span has to reach half a pixel past it --
+     * stopping at the circle throws away the outer half of every edge pixel and
+     * shrinks the ball. */
+    float radius_ext = radius + 0.5f;
+    float radius_ext_sq = radius_ext * radius_ext;
 
     float half_pi = PI * 0.5f;
     float lat_scale = (float)LAT_TILES / PI;
@@ -516,14 +523,14 @@ static bool ensure_sphere_pixel_cache(int size) {
 
     for (int y = 0; y < size; y++) {
         float dy = (float)y - cy;
-        float rem = radius_sq - dy * dy;
+        float rem = radius_ext_sq - dy * dy;
         if (rem < 0.0f) {
             continue;
         }
 
         float dx = sqrtf(rem);
-        int xl = (int)ceilf(cx - dx);
-        int xr = (int)floorf(cx + dx);
+        int xl = (int)floorf(cx - dx);
+        int xr = (int)ceilf(cx + dx);
         if (xl < 0) xl = 0;
         if (xr >= size) xr = size - 1;
 
@@ -533,13 +540,29 @@ static bool ensure_sphere_pixel_cache(int size) {
         for (int x = xl; x <= xr; x++) {
             float vx = ((float)x - cx) * inv_radius;
             float r2 = vx * vx + vy_sq;
-            if (r2 > 1.0f) {
+            float dist = sqrtf(r2) * radius;
+            float coverage = (radius - dist) + 0.5f;
+            if (coverage <= 0.0f) {
                 continue;
             }
+            uint8_t edge_alpha = (coverage >= 1.0f)
+                                     ? 255
+                                     : (uint8_t)(coverage * 255.0f + 0.5f);
 
-            float nz = sqrtf(1.0f - r2);
+            /* Past the silhouette there is no sphere to take a normal from, so
+             * the outer half of the ramp borrows the rim's: project onto the
+             * equator rather than leaving a non-unit vector to skew the shading. */
             float nx = vx;
             float ny = vy;
+            float nz;
+            if (r2 < 1.0f) {
+                nz = sqrtf(1.0f - r2);
+            } else {
+                float inv_len = 1.0f / sqrtf(r2);
+                nx *= inv_len;
+                ny *= inv_len;
+                nz = 0.0f;
+            }
 
             float dot_product = nx * light_x + ny * light_y + nz * light_z;
             float brightness = AMBIENT_LIGHT + DIFFUSE_LIGHT * fmaxf(0.0f, dot_product);
@@ -562,7 +585,7 @@ static bool ensure_sphere_pixel_cache(int size) {
 
             int idx = y * size + x;
             SpherePixelCache *c = &cache[idx];
-            c->valid = 1;
+            c->valid = edge_alpha;
             c->lat_index = (uint8_t)v;
             c->lon_norm = lon_norm;
             c->light_rgb[0] = (uint8_t)clampf(g_color_light_rgb[0] * brightness, 0.0f, 255.0f);
@@ -627,10 +650,17 @@ static void generate_sphere_pixels_band(uint8_t * restrict pixels,
             const uint8_t *src = is_light ? c->light_rgb : c->dark_rgb;
 
             size_t idx = (size_t)x * 4;
-            row[idx + 0] = src[0];
-            row[idx + 1] = src[1];
-            row[idx + 2] = src[2];
-            row[idx + 3] = 255;
+            unsigned int a = c->valid;
+            if (a == 255) {
+                row[idx + 0] = src[0];
+                row[idx + 1] = src[1];
+                row[idx + 2] = src[2];
+            } else {
+                row[idx + 0] = (uint8_t)((src[0] * a + 127u) / 255u);
+                row[idx + 1] = (uint8_t)((src[1] * a + 127u) / 255u);
+                row[idx + 2] = (uint8_t)((src[2] * a + 127u) / 255u);
+            }
+            row[idx + 3] = (uint8_t)a;
         }
     }
 }
@@ -693,6 +723,33 @@ static uint8_t* generate_shadow_pixels(int shadow_size, int * restrict out_width
     return pixels;
 }
 
+/* Source-over for premultiplied operands: out = src + dst * (1 - src_a).
+ *
+ * Everything that lands in a frame texture -- the sphere and the shadow both --
+ * is premultiplied, and the frame is drawn with GL_ONE/GL_ONE_MINUS_SRC_ALPHA to
+ * match. That is what keeps the edge clean: GL_LINEAR interpolates premultiplied
+ * colour correctly, whereas straight alpha drags the transparent surround's
+ * black into every edge texel and rings the ball in a dark fringe.
+ *
+ * It is also the cheaper form -- no divide by the output alpha, and no
+ * un-premultiply back to straight colour afterwards. */
+static inline void blend_over_premul(uint8_t * restrict dp,
+                                     const uint8_t * restrict sp) {
+    unsigned int src_a = sp[3];
+    if (src_a == 0) {
+        return;
+    }
+    if (src_a == 255) {
+        memcpy(dp, sp, 4);
+        return;
+    }
+    unsigned int inv = 255u - src_a;
+    dp[0] = (uint8_t)(sp[0] + (dp[0] * inv + 127u) / 255u);
+    dp[1] = (uint8_t)(sp[1] + (dp[1] * inv + 127u) / 255u);
+    dp[2] = (uint8_t)(sp[2] + (dp[2] * inv + 127u) / 255u);
+    dp[3] = (uint8_t)(src_a + (dp[3] * inv + 127u) / 255u);
+}
+
 __attribute__((hot))
 static void composite_ball_and_shadow(uint8_t * restrict result,
                                       const uint8_t * restrict ball_pixels, const int ball_w, const int ball_h,
@@ -732,30 +789,7 @@ static void composite_ball_and_shadow(uint8_t * restrict result,
             int src_idx = (y * ball_w + x) * 4;
             int dst_idx = (dst_y * composite_w + dst_x) * 4;
 
-            uint8_t src_a = ball_pixels[src_idx + 3];
-            if (src_a == 0) continue;
-
-            uint8_t dst_a = result[dst_idx + 3];
-
-            if (src_a == 255) {
-                result[dst_idx + 0] = ball_pixels[src_idx + 0];
-                result[dst_idx + 1] = ball_pixels[src_idx + 1];
-                result[dst_idx + 2] = ball_pixels[src_idx + 2];
-                result[dst_idx + 3] = 255;
-            } else {
-                unsigned int inv_src_a = 255 - src_a;
-                unsigned int out_a = src_a + ((dst_a * inv_src_a) / 255);
-
-                if (out_a > 0) {
-                    for (int c = 0; c < 3; c++) {
-                        unsigned int src_c = ball_pixels[src_idx + c];
-                        unsigned int dst_c = result[dst_idx + c];
-                        unsigned int out_c = (src_c * src_a + dst_c * dst_a * inv_src_a / 255) / out_a;
-                        result[dst_idx + c] = (uint8_t)out_c;
-                    }
-                    result[dst_idx + 3] = (uint8_t)out_a;
-                }
-            }
+            blend_over_premul(result + dst_idx, ball_pixels + src_idx);
         }
     }
 }
@@ -2146,6 +2180,18 @@ static const char *freerange_frag_shader_text =
     "    gl_FragColor = texture2D(tex, uv) * alpha;\n"
     "}\n";
 
+/* The HUD, the ring menu and the Ghost badge background all carry straight
+ * alpha, so that stays the default. Only the ball frames are premultiplied --
+ * they flip the mode for their own draw and hand it straight back. */
+static void freerange_gl_blend_straight(void) {
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                        GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+static void freerange_gl_blend_premul(void) {
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+}
+
 typedef struct FreedomFrameSet FreedomFrameSet;
 
 typedef struct {
@@ -2515,15 +2561,7 @@ static void freerange_regen_update_scanline(uint8_t * restrict dst_frame,
             const uint8_t *src = ball_pixels + ((size_t)ball_src_y * (size_t)ball_w + (size_t)src_x0) * 4;
             uint8_t *dst = row + (size_t)dst_x0 * 4;
             for (int x = 0; x < copy_w; x++) {
-                const uint8_t *sp = src + (size_t)x * 4;
-                if (sp[3] == 0) {
-                    continue;
-                }
-                uint8_t *dp = dst + (size_t)x * 4;
-                dp[0] = sp[0];
-                dp[1] = sp[1];
-                dp[2] = sp[2];
-                dp[3] = 255;
+                blend_over_premul(dst + (size_t)x * 4, src + (size_t)x * 4);
             }
         }
     }
@@ -3143,7 +3181,7 @@ static bool freerange_gl_init(FreedomState *st, const FreedomFrameSet *frames) {
     glUniform1i(st->gl_tex_loc, 0);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
-    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    freerange_gl_blend_straight();
 
     if (!freerange_gl_upload_frames(st, frames)) {
         return false;
@@ -3316,7 +3354,9 @@ static void freerange_gl_draw_frame(FreedomState *st, const FreedomFrameSet *fra
         base_alpha *= progress;
     }
     glUniform1f(st->gl_alpha_loc, base_alpha);
+    freerange_gl_blend_premul();
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    freerange_gl_blend_straight();
 }
 
 static void hud_blend_pixel(uint8_t *dst, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -5715,7 +5755,9 @@ static int run_freerange_wayland(bool start_muted) {
                 glBindTexture(GL_TEXTURE_2D, st.gl_textures[0]);
                 glVertexAttribPointer(st.gl_pos_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), bverts);
                 glVertexAttribPointer(st.gl_uv_loc, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), bverts + 2);
+                freerange_gl_blend_premul();
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                freerange_gl_blend_straight();
             }
 
             g_menu_was_open = menu_open;
