@@ -24,3 +24,9 @@ emscripten-cache/
 !/8-points.txt
 compile_commands.json
 /*.sh
+
+# AppImage packaging: the staging tree, the built image, and the downloaded
+# tool that produces them. Every toy that ships one generates all three.
+**/AppDir/
+**/*.AppImage
+**/appimagetool
