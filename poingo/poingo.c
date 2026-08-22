@@ -240,8 +240,6 @@ static int g_ball_h = 512;
 #define MIN_BOUNCE_SOUND_SPEED_RATIO 0.4f
 #define BOUNCE_DEBOUNCE_SECONDS 0.095f
 #define RECENT_BOUNCE_PLAYBACK_COUNT 12
-#define AUDIO_SHUTDOWN_CHECK_MS 100u
-#define AUDIO_SHUTDOWN_MAX_MS 2000u
 #define POINGO_EXIT_FADE_SECONDS 0.5f
 #define AUDIO_PREDICT_SECONDS 2.0f
 #define AUDIO_PREDICT_DELAY_SECONDS 0.015f
@@ -962,17 +960,6 @@ static uint64_t g_audit_selected[BOUNCE_SURFACE_COUNT] = {0};
 static uint64_t g_audit_committed[BOUNCE_SURFACE_COUNT] = {0};
 static RecentBouncePlayback g_recent_bounce_playbacks[RECENT_BOUNCE_PLAYBACK_COUNT] = {{0}};
 static int g_recent_bounce_playback_next = 0;
-static bool audio_is_perceptually_quiet(void) {
-    if (!audio_device_open) {
-        return true;
-    }
-
-    audio_lock();
-    bool quiet = toy_mixer_is_quiet(&g_mixer);
-    audio_unlock();
-    return quiet;
-}
-
 /* Ride the mixer down alongside the ball's own fade, so the sound leaves with
  * the picture. Without this a bounce landing just before the quit keeps ringing
  * for well over a second after the ball is gone -- its tail is far longer than
@@ -2300,7 +2287,6 @@ typedef struct {
      * the regen/dissolve on quit, matching balloons and paint. */
     float exit_fade;
     bool ball_cleared;
-    uint32_t shutdown_last_check_ticks;
     uint32_t shutdown_start_ticks;
 
     #define FREEDOM_MOUSE_HISTORY_SIZE 10
@@ -3049,7 +3035,6 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
         st->ball_cleared = true;
         st->shutdown_pending = true;
         st->shutdown_start_ticks = poingo_ticks_ms();
-        st->shutdown_last_check_ticks = st->shutdown_start_ticks;
         audio_begin_shutdown_fade(POINGO_EXIT_FADE_SECONDS);
         return;
     }
@@ -3067,7 +3052,6 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
     st->shutdown_pending = true;
     st->exit_fade = POINGO_EXIT_FADE_SECONDS;
     st->shutdown_start_ticks = poingo_ticks_ms();
-    st->shutdown_last_check_ticks = st->shutdown_start_ticks;
     audio_begin_shutdown_fade(POINGO_EXIT_FADE_SECONDS);
 }
 
@@ -5094,7 +5078,6 @@ static int run_freerange_wayland(bool start_muted) {
     st.shutdown_pending = false;
     st.exit_fade = 0.0f;
     st.ball_cleared = false;
-    st.shutdown_last_check_ticks = 0;
     st.shutdown_start_ticks = 0;
 
     {
@@ -5415,22 +5398,23 @@ static int run_freerange_wayland(bool start_muted) {
         }
 
         if (st.shutdown_pending) {
+            /* Driven from the tick clock rather than the simulation step: the
+             * fade must finish even if the sim is paused or starved.
+             *
+             * The mixer is riding the same POINGO_EXIT_FADE_SECONDS down, so by
+             * the time the fade is up it is at a fraction of a percent of gain
+             * -- inaudible. There is nothing left to wait for and nothing to
+             * poll. It is also why the ball now always completes its fade,
+             * where the old quiet check could cut it short after a tick or two
+             * if the ball happened to be between bounces. */
             uint32_t now_ticks = poingo_ticks_ms();
+            float elapsed = (float)(now_ticks - st.shutdown_start_ticks) * 0.001f;
             if (st.exit_fade > 0.0f) {
-                /* Driven from the tick clock rather than the simulation step:
-                 * the fade must finish even if the sim is paused or starved. */
-                float elapsed = (float)(now_ticks - st.shutdown_start_ticks) * 0.001f;
                 st.exit_fade = POINGO_EXIT_FADE_SECONDS - elapsed;
-                if (st.exit_fade <= 0.0f) st.exit_fade = 0.0f;
+                if (st.exit_fade < 0.0f) st.exit_fade = 0.0f;
             }
-            if (now_ticks - st.shutdown_start_ticks >= AUDIO_SHUTDOWN_MAX_MS) {
+            if (elapsed >= POINGO_EXIT_FADE_SECONDS) {
                 st.running = false;
-            }
-            if (now_ticks - st.shutdown_last_check_ticks >= AUDIO_SHUTDOWN_CHECK_MS) {
-                st.shutdown_last_check_ticks = now_ticks;
-                if (audio_is_perceptually_quiet()) {
-                    st.running = false;
-                }
             }
         }
 
@@ -5628,7 +5612,6 @@ static int run_freerange_wayland(bool start_muted) {
                 st.ball_cleared = true;
                 st.shutdown_pending = true;
                 st.shutdown_start_ticks = poingo_ticks_ms();
-                st.shutdown_last_check_ticks = st.shutdown_start_ticks;
             }
 
             bool menu_open = g_menu && ringmenu_is_open(g_menu);
