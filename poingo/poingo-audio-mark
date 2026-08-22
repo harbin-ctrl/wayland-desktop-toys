@@ -1,0 +1,27 @@
+#!/bin/sh
+# Run this the moment poingo sounds reversed.
+#
+# The startup log settles it only if the fault is a mislinked port. If the
+# routes read clean and it still sounds reversed, the swap is below PipeWire and
+# the evidence has to be taken while it is happening -- the graph as it stands
+# right now, not as it stood at launch. Appends to the same log poingo writes.
+dir="${XDG_CACHE_HOME:-$HOME/.cache}/poingo"
+mkdir -p "$dir" 2>/dev/null
+log="$dir/session.log"
+{
+    echo "###############################################################"
+    echo "### $(date -Is) REVERSED REPORTED BY USER"
+    echo "###############################################################"
+    echo "--- links ---"
+    pw-link -l 2>&1
+    echo "--- default sink ---"
+    wpctl inspect @DEFAULT_AUDIO_SINK@ 2>&1
+    echo "--- poingo node ---"
+    pw-cli ls Node 2>/dev/null | grep -iB2 -A8 poingo
+    echo "--- alsa channel map ---"
+    for c in /proc/asound/card*/pcm*p/sub*/hw_params; do
+        [ -r "$c" ] && { echo "$c:"; cat "$c"; }
+    done 2>/dev/null
+    echo "### end of report"
+} >>"$log" 2>&1
+echo "Captured to $log"

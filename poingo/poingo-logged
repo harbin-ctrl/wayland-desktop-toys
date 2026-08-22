@@ -1,16 +1,33 @@
 #!/bin/sh
 # Poingo's PipeWire channel-route audit goes to stderr, which a panel or menu
-# launch throws away. The stereo-reversal fault is rare and cannot be
-# reproduced on demand, so the log has to already be running when it happens.
-# Keeps one previous session, then execs the real binary.
+# launch throws away. The stereo-reversal fault is rare, cannot be reproduced on
+# demand, and shows up only after many separate runs -- so the log has to
+# already be running, and it has to keep the history of every run leading up to
+# the fault. The moment it first goes reversed is the interesting one, and it is
+# worthless without the runs before it for comparison.
+#
+# A run costs about 250 bytes, so five 4MB generations hold on the order of
+# eighty thousand launches. Nothing here rotates away in practice.
 dir="${XDG_CACHE_HOME:-$HOME/.cache}/poingo"
 mkdir -p "$dir" 2>/dev/null
 log="$dir/session.log"
-if [ -f "$log" ] && [ "$(wc -c <"$log" 2>/dev/null || echo 0)" -gt 262144 ]; then
-    mv -f "$log" "$log.1" 2>/dev/null
+
+if [ -f "$log" ] && [ "$(wc -c <"$log" 2>/dev/null || echo 0)" -gt 4194304 ]; then
+    rm -f "$log.5"
+    for n in 4 3 2 1; do
+        [ -f "$log.$n" ] && mv -f "$log.$n" "$log.$((n + 1))"
+    done
+    mv -f "$log" "$log.1"
 fi
-{
-    echo "=== $(date -Is) poingo start ==="
-    command -v pw-link >/dev/null 2>&1 && pw-link -l 2>/dev/null | sed 's/^/graph: /'
-} >>"$log" 2>/dev/null
+
+# The sink and the graph's port count are logged per run because both are
+# suspects: a sink change is exactly what would tear down and remake the links,
+# and port count is the load that used to blind the route audit.
+sink=$(wpctl inspect @DEFAULT_AUDIO_SINK@ 2>/dev/null |
+       sed -n 's/.*node\.name = "\([^"]*\)".*/\1/p' | head -1)
+out_ports=$(pw-link -o 2>/dev/null | wc -l)
+in_ports=$(pw-link -i 2>/dev/null | wc -l)
+printf '=== %s start sink=%s ports=%s/%s ===\n' \
+    "$(date -Is)" "${sink:-unknown}" "$out_ports" "$in_ports" >>"$log" 2>/dev/null
+
 exec poingo "$@" 2>>"$log"

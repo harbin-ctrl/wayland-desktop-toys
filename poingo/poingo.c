@@ -6057,6 +6057,12 @@ static int run_freerange_wayland(bool start_muted) {
         eglTerminate(st.egl_display);
     }
 
+    /* Owns a wl_surface and wl_buffers, so it has to go before the compositor
+     * and shm that made them -- and well before wl_display_disconnect, which
+     * frees every proxy on the connection. Destroying them afterwards is a
+     * use-after-free, and it segfaulted on every single exit. */
+    ball_cursor_destroy();
+
     if (st.pointer) {
         wl_pointer_destroy(st.pointer);
     }
@@ -6092,7 +6098,6 @@ static int run_freerange_wayland(bool start_muted) {
     }
 
     freerange_color_regen_shutdown(&st);
-    ball_cursor_destroy();
     freerange_destroy_frames(&frames);
     shutdown_audio();
     if (g_menu) { ringmenu_destroy(g_menu); g_menu = NULL; }
