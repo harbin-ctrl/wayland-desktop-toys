@@ -11,7 +11,7 @@ TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
 TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
 GHOSTICON_DIR := $(CURDIR)/../shared
 GHOSTICON_LIB := $(GHOSTICON_DIR)/libghosticon.a
-POINGO_SRC := poingo.c xdg-shell-protocol.c xdg-decoration-unstable-v1-protocol.c
+POINGO_SRC := poingo.c xdg-shell-protocol.c
 ICON_SRC := icon_maker.c
 ICON_SIZES := 32 48 64 128 192 256 512 1024
 ICON_BMPS := $(addprefix icon_,$(addsuffix .bmp,$(ICON_SIZES)))
@@ -70,7 +70,6 @@ debug: all
 # opens a display. The plain build covers physics and the command line; the
 # ThreadSanitizer build is what catches the regeneration races.
 TEST_DEPS := test_poingo.c poingo.c xdg-shell-client-protocol.h \
-	xdg-decoration-unstable-v1-client-protocol.h \
 	$(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
 
 test: test_poingo test_poingo_tsan
@@ -79,12 +78,10 @@ test: test_poingo test_poingo_tsan
 
 test_poingo: $(TEST_DEPS)
 	$(CC) $(CFLAGS) -g test_poingo.c xdg-shell-protocol.c \
-		xdg-decoration-unstable-v1-protocol.c \
 		$(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) -o $@ $(LDFLAGS)
 
 test_poingo_tsan: $(TEST_DEPS)
 	$(CC) $(CFLAGS) -g -fsanitize=thread test_poingo.c xdg-shell-protocol.c \
-		xdg-decoration-unstable-v1-protocol.c \
 		$(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) -o $@ $(LDFLAGS)
 
 run: poingo
@@ -146,13 +143,7 @@ xdg-shell-client-protocol.h:
 xdg-shell-protocol.c:
 	wayland-scanner private-code $(WAYLAND_PROTOCOLS_DIR)/stable/xdg-shell/xdg-shell.xml $@
 
-xdg-decoration-unstable-v1-client-protocol.h:
-	wayland-scanner client-header $(WAYLAND_PROTOCOLS_DIR)/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml $@
-
-xdg-decoration-unstable-v1-protocol.c:
-	wayland-scanner private-code $(WAYLAND_PROTOCOLS_DIR)/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml $@
-
-poingo.o: xdg-shell-client-protocol.h xdg-decoration-unstable-v1-client-protocol.h \
+poingo.o: xdg-shell-client-protocol.h \
 	$(TOYAUDIO_DIR)/toy_audio.h $(TOYAUDIO_DIR)/toy_audio_stream.h
 
 clean:

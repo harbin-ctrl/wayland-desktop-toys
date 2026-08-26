@@ -163,11 +163,8 @@ static bool g_ring_pointer_left_pending = false;
 #include <linux/input.h>
 #include <linux/input-event-codes.h>
 #include "xdg-shell-client-protocol.h"
-#include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "ghost_icon.h"
 
-#define WINDOW_WIDTH 640
-#define WINDOW_HEIGHT 480
 
 #define GRAVITY 0.00014f
 /* A flick can reach window_w * 0.4 per frame and the speed multiplier goes to
@@ -188,13 +185,9 @@ static int g_ball_w = 512;
 static int g_ball_h = 512;
 #define BALL_W g_ball_w
 #define BALL_H g_ball_h
-#define BALL_R (g_ball_w / 2.0f)
 
 #define FREERANGE_REGEN_BLOCK_SIZE 8
 
-#define REGEN_TIME_BUDGET_MS       5.0
-#define REGEN_TIMER_CHECK_INTERVAL 4
-#define FREERANGE_REGEN_COLD_START 4
 
 /* Regen runs as fast as the machine allows rather than to a fixed duration.
  * Spreading it over a set number of ticks was an attempt to make it look the
@@ -221,31 +214,20 @@ static int g_ball_h = 512;
 #define COLOR_DARK_G 173
 #define COLOR_DARK_B 255
 
-#define BG_COLOR_R 86
-#define BG_COLOR_G 78
-#define BG_COLOR_B 71
 #define GRID_COLOR_R 99
 #define GRID_COLOR_G 95
 #define GRID_COLOR_B 97
 #define GRID_A_COLOR_R 101
 #define GRID_A_COLOR_G 91
 #define GRID_A_COLOR_B 134
-#define FRAMES_N (FPS * ROT_PERIOD * (LON_TILES / 2))
-#define PERIOD_FRAMES ((int)(FRAMES_N * (2.0f / LON_TILES) + 0.5f))
-#define FRAME_COUNT PERIOD_FRAMES
-#define HALF_PERIOD ((FRAME_COUNT / 2))
-#define ADV_PER_TICK (PERIOD_FRAMES / (ROT_PERIOD * FPS))
 
 #define SAMPLE_RATE 48000
 #define MASTER_VOLUME_MIN 0.0f
 #define MASTER_VOLUME_MAX 1.5f
 #define MASTER_VOLUME_STEP 0.05f
-#define MASTER_VOLUME_FINE_STEP (MASTER_VOLUME_STEP * 0.2f)
 #define VOLUME_HUD_HOLD_TIME 1.5f
 
 #define MIN_BOUNCE_SOUND_SPEED_RATIO 0.4f
-#define BOUNCE_DEBOUNCE_SECONDS 0.095f
-#define RECENT_BOUNCE_PLAYBACK_COUNT 12
 #define POINGO_EXIT_FADE_SECONDS 0.5f
 #define AUDIO_PREDICT_SECONDS 2.0f
 #define AUDIO_PREDICT_DELAY_SECONDS 0.015f
@@ -256,9 +238,7 @@ static int g_ball_h = 512;
 #define AUDIO_PREDICT_ONSET_COMPENSATION_SECONDS 0.0125f
 #define AUDIO_PREDICT_MAX_EVENTS 128
 #define AUDIO_PREDICT_FIXED_STEP_SECONDS (1.0f / 240.0f)
-#define AUDIO_PREDICT_QUEUE_MAX 128
 #define AUDIO_PREDICT_EVENT_STALE_SECONDS 0.150f
-#define AUDIO_PREDICT_PLAYED_RETENTION_SECONDS 0.250f
 
 static float AUDIO_NORMALIZED_MIN = 0.0f;
 static const float AUDIO_NORMALIZED_MAX = 10.0f;
@@ -276,7 +256,6 @@ static float g_target_peak_y = TARGET_PEAK_Y;
 #endif
 #define SPEED_MAX 9.9f
 #define SPEED_STEP 0.1f
-#define SPEED_FINE_STEP (SPEED_STEP * 0.2f)
 #define SPEED_HUD_HOLD_TIME 1.5f
 #define SPEED_HUD_FADE_TIME 0.5f
 #define FREEDOM_BALL_SCALE_MIN 0.25f
@@ -909,19 +888,6 @@ typedef struct {
     int count;
 } AudioPredictBuffer;
 
-typedef struct {
-    BounceEvent event;
-    float last_seen_time;
-    bool active;
-    bool played;
-} AudioPredictQueueEntry;
-
-typedef struct {
-    float time;
-    int volume;
-    int surface;
-    bool valid;
-} RecentBouncePlayback;
 
 AudioState audio_state = {
     .bounce = { NULL, NULL, 0, true },
@@ -946,7 +912,6 @@ static void update_bounce_sound_style_for_mode(void) {
 }
 
 static AudioPredictBuffer g_audio_predict = {0};
-static AudioPredictQueueEntry g_audio_predict_queue[AUDIO_PREDICT_QUEUE_MAX] = {0};
 static float g_audio_sim_time = 0.0f;
 static float g_audio_predict_delay_seconds = AUDIO_PREDICT_DELAY_SECONDS;
 static float g_audio_predict_step_seconds = 1.0f / (float)FPS;
@@ -964,8 +929,6 @@ static bool g_predict_audit = false;
 static uint64_t g_audit_expected[BOUNCE_SURFACE_COUNT] = {0};
 static uint64_t g_audit_selected[BOUNCE_SURFACE_COUNT] = {0};
 static uint64_t g_audit_committed[BOUNCE_SURFACE_COUNT] = {0};
-static RecentBouncePlayback g_recent_bounce_playbacks[RECENT_BOUNCE_PLAYBACK_COUNT] = {{0}};
-static int g_recent_bounce_playback_next = 0;
 /* Ride the mixer down alongside the ball's own fade, so the sound leaves with
  * the picture. Without this a bounce landing just before the quit keeps ringing
  * for well over a second after the ball is gone -- its tail is far longer than
@@ -1626,177 +1589,8 @@ static inline void append_bounce_event(BounceEvent *events, int *event_count, in
     (*event_count)++;
 }
 
-static float get_bounce_dedupe_window_seconds(void) {
-    float dedupe_window = g_audio_predict_step_seconds * 1.5f;
-    if (dedupe_window < 0.020f) {
-        dedupe_window = 0.020f;
-    }
-    if (dedupe_window > BOUNCE_DEBOUNCE_SECONDS) {
-        dedupe_window = BOUNCE_DEBOUNCE_SECONDS;
-    }
-    return dedupe_window;
-}
-
-static bool __attribute__((unused))
-recent_bounce_playback_matches(const BounceEvent *ev) {
-    if (!ev) {
-        return false;
-    }
-    float dedupe_window = get_bounce_dedupe_window_seconds();
-    for (int i = 0; i < RECENT_BOUNCE_PLAYBACK_COUNT; ++i) {
-        const RecentBouncePlayback *recent = &g_recent_bounce_playbacks[i];
-        if (!recent->valid) {
-            continue;
-        }
-        if (recent->surface != ev->surface) {
-            continue;
-        }
-        if (fabsf(recent->time - ev->time) > dedupe_window) {
-            continue;
-        }
-        if (abs(recent->volume - ev->volume) > 2) {
-            continue;
-        }
-        return true;
-    }
-    return false;
-}
-
-static void clear_audio_predict_queue(void) {
-    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
-        g_audio_predict_queue[i].active = false;
-        g_audio_predict_queue[i].played = false;
-        g_audio_predict_queue[i].last_seen_time = -1000000.0f;
-    }
-}
-
-static float get_audio_predict_match_window_seconds(void) {
-    float match_window = g_audio_predict_step_seconds * 2.5f;
-    if (match_window < 0.010f) {
-        match_window = 0.010f;
-    }
-    if (match_window > 0.050f) {
-        match_window = 0.050f;
-    }
-    return match_window;
-}
-
-static int find_audio_predict_queue_match(const BounceEvent *ev) {
-    if (!ev) {
-        return -1;
-    }
-    float match_window = get_audio_predict_match_window_seconds();
-    float best_diff = match_window + 1.0f;
-    int best_index = -1;
-    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
-        const AudioPredictQueueEntry *entry = &g_audio_predict_queue[i];
-        if (!entry->active || entry->played) {
-            continue;
-        }
-        if (entry->event.surface != ev->surface) {
-            continue;
-        }
-        if (abs(entry->event.volume - ev->volume) > 2) {
-            continue;
-        }
-        float diff = fabsf(entry->event.time - ev->time);
-        if (diff > match_window) {
-            continue;
-        }
-        if (diff < best_diff) {
-            best_diff = diff;
-            best_index = i;
-        }
-    }
-    return best_index;
-}
-
-static int allocate_audio_predict_queue_slot(void) {
-    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
-        if (!g_audio_predict_queue[i].active) {
-            return i;
-        }
-    }
-
-    int best_index = 0;
-    float best_score = 1000000.0f;
-    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
-        const AudioPredictQueueEntry *entry = &g_audio_predict_queue[i];
-        float score = entry->played ? entry->event.time - 1000.0f : entry->event.time;
-        if (score < best_score) {
-            best_score = score;
-            best_index = i;
-        }
-    }
-    return best_index;
-}
-
-static void __attribute__((unused))
-reconcile_audio_predict_queue(const AudioPredictBuffer *buffer, float now_time) {
-    if (!buffer) {
-        return;
-    }
-
-    for (int i = 0; i < buffer->count; ++i) {
-        const BounceEvent *ev = &buffer->events[i];
-        int match_index = find_audio_predict_queue_match(ev);
-        if (match_index >= 0) {
-            g_audio_predict_queue[match_index].event = *ev;
-            g_audio_predict_queue[match_index].last_seen_time = now_time;
-        } else {
-            int slot = allocate_audio_predict_queue_slot();
-            g_audio_predict_queue[slot].event = *ev;
-            g_audio_predict_queue[slot].last_seen_time = now_time;
-            g_audio_predict_queue[slot].active = true;
-            g_audio_predict_queue[slot].played = false;
-        }
-    }
-}
-
-static void __attribute__((unused))
-cleanup_audio_predict_queue(float now_time, float effective_delay) {
-    for (int i = 0; i < AUDIO_PREDICT_QUEUE_MAX; ++i) {
-        AudioPredictQueueEntry *entry = &g_audio_predict_queue[i];
-        if (!entry->active) {
-            continue;
-        }
-
-        if (entry->played) {
-            if ((now_time - entry->event.time) > AUDIO_PREDICT_PLAYED_RETENTION_SECONDS) {
-                entry->active = false;
-            }
-            continue;
-        }
-
-        if ((now_time - entry->last_seen_time) > AUDIO_PREDICT_EVENT_STALE_SECONDS) {
-            entry->active = false;
-            continue;
-        }
-
-        if ((entry->event.time + effective_delay) < (now_time - AUDIO_PREDICT_EVENT_STALE_SECONDS)) {
-            entry->active = false;
-        }
-    }
-}
-
-static void __attribute__((unused))
-record_recent_bounce_playback(const BounceEvent *ev) {
-    if (!ev) {
-        return;
-    }
-    g_recent_bounce_playbacks[g_recent_bounce_playback_next].time = ev->time;
-    g_recent_bounce_playbacks[g_recent_bounce_playback_next].volume = ev->volume;
-    g_recent_bounce_playbacks[g_recent_bounce_playback_next].surface = ev->surface;
-    g_recent_bounce_playbacks[g_recent_bounce_playback_next].valid = true;
-    g_recent_bounce_playback_next++;
-    if (g_recent_bounce_playback_next >= RECENT_BOUNCE_PLAYBACK_COUNT) {
-        g_recent_bounce_playback_next = 0;
-    }
-}
-
 static void audio_predict_reset(float now_time) {
     (void)now_time;
-    clear_audio_predict_queue();
     for (int surface = 0; surface < BOUNCE_SURFACE_COUNT; ++surface) {
         if (g_actual_bounce_serial[surface] <
             g_played_bounce_serial[surface]) {
@@ -1806,10 +1600,6 @@ static void audio_predict_reset(float now_time) {
         g_played_bounce_serial[surface] =
             g_actual_bounce_serial[surface];
     }
-    for (int i = 0; i < RECENT_BOUNCE_PLAYBACK_COUNT; ++i) {
-        g_recent_bounce_playbacks[i].valid = false;
-    }
-    g_recent_bounce_playback_next = 0;
 }
 
 static float get_audio_predict_effective_delay_seconds(void) {
@@ -2282,10 +2072,6 @@ typedef struct {
 
     FreedomFrameSet *frames_ref;
     bool color_regen_active;
-    uint32_t color_regen_start;
-    uint32_t color_regen_stride;
-    uint32_t color_regen_cursor;
-    uint32_t color_regen_units_done;
     uint32_t color_regen_units_total;
     float color_regen_angle_period;
     uint8_t *color_regen_shadow_pixels;
@@ -2295,14 +2081,12 @@ typedef struct {
     int color_regen_shadow_offset_y;
     int color_regen_ball_offset_x;
     int color_regen_ball_offset_y;
-    uint8_t *color_regen_ball_pixels;
     int color_regen_mode;
     int color_regen_block_size;
     /* Alpha fades in with the very first beam only. A colour change regen
      * replaces a ball that is already on screen, and fading that one out and
      * back in reads as a flicker rather than an arrival. */
     bool color_regen_fade_in;
-    float regen_ms_per_block;
     RegenWorkerCtx *regen_worker_ctx;
     RegenWorkerCtx regen_ctx_storage;
     PoingoAtomic *regen_unit_done_storage;
@@ -2341,7 +2125,6 @@ typedef struct {
 
     uint64_t last_counter;
     uint64_t performance_frequency;
-    bool has_last_counter;
     bool make_noise;
     float last_total_prop;
 
@@ -2377,8 +2160,6 @@ static void freerange_color_regen_shutdown(FreedomState *st) {
     st->color_regen_shadow_pixels = NULL;
     st->color_regen_shadow_w = 0;
     st->color_regen_shadow_h = 0;
-    free(st->color_regen_ball_pixels);
-    st->color_regen_ball_pixels = NULL;
 }
 
 static int freerange_regen_worker(void *userdata) {
@@ -2483,15 +2264,6 @@ static bool freerange_color_regen_prepare_assets(FreedomState *st, const Freedom
     st->color_regen_ball_offset_y = g_ball_texture_offset_y;
     st->color_regen_mode = BALL_REGEN_FILL;
 
-    if (!st->color_regen_ball_pixels) {
-        size_t ball_size = (size_t)BALL_W * (size_t)BALL_H * 4;
-        if (posix_memalign((void**)&st->color_regen_ball_pixels, 32, ball_size) != 0) {
-            st->color_regen_ball_pixels = NULL;
-            return false;
-        }
-        memset(st->color_regen_ball_pixels, 0, ball_size);
-    }
-
     if (!st->color_regen_shadow_pixels) {
         const int sphere_texture_size = BALL_W;
         const float canonical_total_prop = 1.0f;
@@ -2578,18 +2350,6 @@ static void freerange_regen_update_scanline(uint8_t * restrict dst_frame,
     }
 }
 
-/* Chunk size is about keeping per-unit overhead small, not about pacing.
- * The chunking exists because the Pi was pathologically slow when the work
- * was handed out finely -- the cross-thread chatter cost more than the
- * pixels. Blocks stay coarse for that reason; they are no longer sized to
- * make the regen last a particular number of ticks. */
-static int freerange_regen_ideal_block_size(float ms_per_block, int frame_count, int frame_h) {
-    (void)ms_per_block;
-    if (frame_count <= 0 || frame_h <= 0) {
-        return FREERANGE_REGEN_BLOCK_SIZE;
-    }
-    return FREERANGE_REGEN_BLOCK_SIZE;
-}
 
 static bool freerange_regen_workspace_prepare(FreedomState *st,
                                                const FreedomFrameSet *frames) {
@@ -2628,8 +2388,10 @@ static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet 
        frame set, the completion array and the worker context. */
     freerange_regen_workers_shutdown(st);
 
-    int block_size = freerange_regen_ideal_block_size(st->regen_ms_per_block,
-                                                      frames->frame_count, frames->frame_h);
+    /* Blocks stay coarse because the Pi was pathologically slow when the work
+       was handed out finely -- the cross-thread chatter cost more than the
+       pixels. Size is about per-unit overhead, not pacing. */
+    int block_size = FREERANGE_REGEN_BLOCK_SIZE;
     st->color_regen_block_size = block_size;
 
     int regen_num_blocks = (frames->frame_h + block_size - 1) / block_size;
@@ -2649,10 +2411,6 @@ static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet 
         }
     }
 
-    st->color_regen_start = start;
-    st->color_regen_stride = stride;
-    st->color_regen_cursor = 0;
-    st->color_regen_units_done = 0;
     st->color_regen_units_total = total_units;
     st->color_regen_fade_in = false;   /* opt-in; see the startup beam */
 
@@ -3141,6 +2899,7 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
     st->shutdown_start_ticks = poingo_ticks_ms();
     audio_begin_shutdown_fade(POINGO_EXIT_FADE_SECONDS);
 }
+
 
 /* Returns 0 on failure. Without the status check a driver that rejects the
    GLSL still links a do-nothing program, and Poingo opens as an empty
@@ -4763,6 +4522,7 @@ static void freerange_registry_global(void *data, struct wl_registry *registry,
     if (!st) {
         return;
     }
+
     /* version is the highest the compositor supports, not the one to use.
        Asking for more than it offers is a protocol error, and the client is
        killed for it. */
@@ -5260,7 +5020,6 @@ static int run_freerange_wayland(bool start_muted) {
         st.performance_frequency = 1;
     }
     st.last_counter = poingo_perf_counter();
-    st.has_last_counter = true;
 
     const double TARGET_FRAME_SECONDS = 1.0 / (double)target_fps;
     const double SNAP_THRESHOLD = fmax(0.00075, TARGET_FRAME_SECONDS * 0.08);
@@ -5310,7 +5069,6 @@ static int run_freerange_wayland(bool start_muted) {
     double  prev_non_upload_ms  = 0.0;
     double  regen_ms_per_unit   = 0.0;
     bool    prev_regen_active   = false;
-    int     regen_measure_frames = 0;
 
     int    drop_red          = 0;
     int    drop_yellow       = 0;
@@ -5725,7 +5483,6 @@ static int run_freerange_wayland(bool start_muted) {
 
             if (st.color_regen_active && !prev_regen_active) {
                 regen_ms_per_unit    = 0.0;
-                regen_measure_frames = 0;
             }
 
             /* Everything left in the frame after the rest of the tick, less a
@@ -5757,8 +5514,6 @@ static int run_freerange_wayland(bool start_muted) {
                 regen_ms_per_unit = (regen_ms_per_unit <= 0.0)
                     ? mpu
                     : 0.2 * regen_ms_per_unit + 0.8 * mpu;
-                st.regen_ms_per_block = (float)regen_ms_per_unit;
-                regen_measure_frames++;
             }
 
             /* The regen used to re-chunk itself mid-flight -- measure a
