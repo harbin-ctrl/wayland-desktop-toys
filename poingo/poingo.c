@@ -2186,6 +2186,9 @@ typedef struct {
     int ball_offset_y;
     PoingoAtomic next_seq;
     PoingoAtomic stop;
+    /* A worker that cannot allocate its scratch image sets this. Without it
+       the upload loop waits forever on a unit nobody will ever finish. */
+    PoingoAtomic failed;
     PoingoAtomic *unit_done;
 } RegenWorkerCtx;
 
@@ -2332,10 +2335,16 @@ static void freerange_gl_draw_hud(FreedomState *st);
 static void freerange_regen_workers_shutdown(FreedomState *st);
 static void freerange_regen_update_scanline(uint8_t *restrict dst_frame, int composite_w, int composite_h, int y, const uint8_t *restrict ball_pixels, int ball_w, int ball_h, const uint8_t *restrict shadow_pixels, int shadow_w, int shadow_h, int ball_x, int ball_y, int shadow_x, int shadow_y);
 
+/* The workers write into the frame set and read the regeneration assets, so
+   joining them is the first thing this does. Every teardown path -- normal
+   exit and each startup failure alike -- goes through here, which is what
+   makes "no worker outlives the memory it touches" an invariant rather than
+   something each caller has to remember. */
 static void freerange_color_regen_shutdown(FreedomState *st) {
     if (!st) {
         return;
     }
+    freerange_regen_workers_shutdown(st);
     free(st->color_regen_shadow_pixels);
     st->color_regen_shadow_pixels = NULL;
     st->color_regen_shadow_w = 0;
@@ -2350,6 +2359,7 @@ static int freerange_regen_worker(void *userdata) {
     size_t ball_size = (size_t)BALL_W * (size_t)BALL_H * 4;
     uint8_t *ball_pixels = NULL;
     if (posix_memalign((void **)&ball_pixels, 32, ball_size) != 0) {
+        poingo_atomic_set(&ctx->failed, 1);
         return 0;
     }
     memset(ball_pixels, 0, ball_size);
@@ -2430,6 +2440,7 @@ static void freerange_regen_workers_shutdown(FreedomState *st) {
         st->regen_worker_ctx = NULL;
     }
     st->regen_units_uploaded = 0;
+    st->color_regen_active = false;
 }
 
 static bool freerange_color_regen_prepare_assets(FreedomState *st, const FreedomFrameSet *frames) {
@@ -2585,6 +2596,10 @@ static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet 
         return;
     }
 
+    /* Nothing below may run alongside the previous batch: they share the
+       frame set, the completion array and the worker context. */
+    freerange_regen_workers_shutdown(st);
+
     int block_size = freerange_regen_ideal_block_size(st->regen_ms_per_block,
                                                       frames->frame_count, frames->frame_h);
     st->color_regen_block_size = block_size;
@@ -2613,8 +2628,6 @@ static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet 
     st->color_regen_units_total = total_units;
     st->color_regen_fade_in = false;   /* opt-in; see the startup beam */
 
-    freerange_regen_workers_shutdown(st);
-
     if (!st->regen_unit_done_storage || !st->regen_order_storage ||
         !st->regen_thread_storage || total_units > st->regen_workspace_units) return;
     RegenWorkerCtx *ctx = &st->regen_ctx_storage;
@@ -2642,6 +2655,7 @@ static void freerange_color_regen_start(FreedomState *st, const FreedomFrameSet 
     ctx->ball_offset_y   = st->color_regen_ball_offset_y;
     poingo_atomic_set(&ctx->next_seq, 0);
     poingo_atomic_set(&ctx->stop, 0);
+    poingo_atomic_set(&ctx->failed, 0);
 
     st->regen_worker_ctx   = ctx;
     st->regen_units_uploaded = 0;
@@ -2679,6 +2693,15 @@ static void freerange_regen_upload_step(FreedomState *st, FreedomFrameSet *frame
     }
 
     RegenWorkerCtx *ctx = st->regen_worker_ctx;
+
+    /* A worker that could not allocate its scratch image leaves units that
+       never complete. Drop the regen rather than stalling on them forever;
+       the frames keep whatever they already held. */
+    if (poingo_atomic_get(&ctx->failed)) {
+        freerange_regen_workers_shutdown(st);
+        return;
+    }
+
     const int total        = (int)ctx->regen_total;
     const int block_size   = ctx->block_size;
     const int num_blocks   = ctx->num_blocks;
@@ -3000,16 +3023,52 @@ static void ball_cursor_destroy(void) {
     memset(&g_ball_cursor, 0, sizeof(g_ball_cursor));
 }
 
-static void freerange_color_randomize_and_regen(FreedomState *st) {
+/* Which look the transition should switch to, alongside the palette. */
+typedef enum {
+    POINGO_MODE_KEEP,        /* colour only; leave the tilt and grid alone */
+    POINGO_MODE_NOSTALGIA,
+    POINGO_MODE_POINGO,
+} PoingoModeChange;
+
+/*
+ * The only path allowed to change the ball's look. Everything it touches --
+ * the global palette, the axis vectors, the shared sphere cache, the frame
+ * set -- is also read by the regeneration workers, so the order is fixed:
+ *
+ *     join old workers -> change palette/mode -> rebuild cache -> start new
+ *
+ * Both halves of the menu reach the same colours by repeatable clicks
+ * (NEW COLOR, NOSTALGIA, POINGO, the pickers), so a second change landing
+ * mid-regen is ordinary use, not an edge case. Doing any of the middle steps
+ * with workers still running is a data race.
+ *
+ * A NULL light_rgb means "pick a fresh colour" rather than "set this one".
+ */
+static void freerange_regen_transition(FreedomState *st, PoingoModeChange mode,
+                                       const uint8_t light_rgb[3],
+                                       const uint8_t dark_rgb[3]) {
     if (!st || !st->frames_ref) {
         return;
     }
 
-    float light_value = fmaxf(g_color_light_rgb[0],
-                              fmaxf(g_color_light_rgb[1], g_color_light_rgb[2])) / 255.0f;
-    pick_palette_colors(light_value,
-                        g_color_light_rgb, g_color_dark_rgb,
-                        false);
+    freerange_regen_workers_shutdown(st);
+
+    if (mode == POINGO_MODE_NOSTALGIA) {
+        set_a_mode_enabled(true);
+    } else if (mode == POINGO_MODE_POINGO) {
+        set_a_mode_enabled(false);
+    }
+
+    if (light_rgb && dark_rgb) {
+        memcpy(g_color_light_rgb, light_rgb, sizeof(g_color_light_rgb));
+        memcpy(g_color_dark_rgb, dark_rgb, sizeof(g_color_dark_rgb));
+    } else {
+        float light_value = fmaxf(g_color_light_rgb[0],
+                                  fmaxf(g_color_light_rgb[1], g_color_light_rgb[2])) / 255.0f;
+        pick_palette_colors(light_value,
+                            g_color_light_rgb, g_color_dark_rgb,
+                            false);
+    }
 
     invalidate_sphere_pixel_cache();
     if (!ensure_sphere_pixel_cache(BALL_W)) {
@@ -3053,31 +3112,6 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
     st->exit_fade = POINGO_EXIT_FADE_SECONDS;
     st->shutdown_start_ticks = poingo_ticks_ms();
     audio_begin_shutdown_fade(POINGO_EXIT_FADE_SECONDS);
-}
-
-static void freerange_color_set_and_regen(FreedomState *st,
-                                        const uint8_t light_rgb[3],
-                                        const uint8_t dark_rgb[3]) {
-    if (!st || !st->frames_ref || !light_rgb || !dark_rgb) {
-        return;
-    }
-
-    g_color_light_rgb[0] = light_rgb[0];
-    g_color_light_rgb[1] = light_rgb[1];
-    g_color_light_rgb[2] = light_rgb[2];
-    g_color_dark_rgb[0] = dark_rgb[0];
-    g_color_dark_rgb[1] = dark_rgb[1];
-    g_color_dark_rgb[2] = dark_rgb[2];
-
-    invalidate_sphere_pixel_cache();
-    if (!ensure_sphere_pixel_cache(BALL_W)) {
-        return;
-    }
-
-    if (!freerange_color_regen_prepare_assets(st, st->frames_ref)) {
-        return;
-    }
-    freerange_color_regen_start(st, st->frames_ref);
 }
 
 static GLuint freerange_gl_create_shader(const char *source, GLenum type) {
@@ -4233,7 +4267,7 @@ static void freerange_ring_menu_button(FreedomState *st, int rbtn, bool pressed)
         memcpy(dark_rgb, g_color_dark_rgb, 3);
         if (slot == 0) memcpy(light_rgb, g_picker_color, 3);
         else memcpy(dark_rgb, g_picker_color, 3);
-        freerange_color_set_and_regen(st, light_rgb, dark_rgb);
+        freerange_regen_transition(st, POINGO_MODE_KEEP, light_rgb, dark_rgb);
         poingo_menu_sync_drops();
         return;
     }
@@ -4248,15 +4282,13 @@ static void freerange_ring_menu_button(FreedomState *st, int rbtn, bool pressed)
         if (result == POINGO_MENU_NOSTALGIA) {
             const uint8_t light_rgb[3] = { 255, 255, 255 };
             const uint8_t dark_rgb[3] = { 255, 0, 0 };
-            set_a_mode_enabled(true);
-            freerange_color_set_and_regen(st, light_rgb, dark_rgb);
+            freerange_regen_transition(st, POINGO_MODE_NOSTALGIA, light_rgb, dark_rgb);
         } else if (result == POINGO_MENU_POINGO) {
             const uint8_t light_rgb[3] = { COLOR_LIGHT_R, COLOR_LIGHT_G, COLOR_LIGHT_B };
             const uint8_t dark_rgb[3] = { COLOR_DARK_R, COLOR_DARK_G, COLOR_DARK_B };
-            set_a_mode_enabled(false);
-            freerange_color_set_and_regen(st, light_rgb, dark_rgb);
+            freerange_regen_transition(st, POINGO_MODE_POINGO, light_rgb, dark_rgb);
         } else if (result == POINGO_MENU_NEWCOLOR) {
-            freerange_color_randomize_and_regen(st);
+            freerange_regen_transition(st, POINGO_MODE_KEEP, NULL, NULL);
         } else if (result == POINGO_MENU_MUTE) {
             toggle_master_mute();
         } else if (result == POINGO_MENU_GHOST) {
@@ -4530,15 +4562,13 @@ static void freerange_keyboard_key(void *data, struct wl_keyboard *keyboard,
         } else if (key == KEY_A) {
             const uint8_t light_rgb[3] = { 255, 255, 255 };
             const uint8_t dark_rgb[3] = { 255, 0, 0 };
-            set_a_mode_enabled(true);
-            freerange_color_set_and_regen(st, light_rgb, dark_rgb);
+            freerange_regen_transition(st, POINGO_MODE_NOSTALGIA, light_rgb, dark_rgb);
         } else if (key == KEY_P) {
             const uint8_t light_rgb[3] = { COLOR_LIGHT_R, COLOR_LIGHT_G, COLOR_LIGHT_B };
             const uint8_t dark_rgb[3] = { COLOR_DARK_R, COLOR_DARK_G, COLOR_DARK_B };
-            set_a_mode_enabled(false);
-            freerange_color_set_and_regen(st, light_rgb, dark_rgb);
+            freerange_regen_transition(st, POINGO_MODE_POINGO, light_rgb, dark_rgb);
         } else if (key == KEY_C) {
-            freerange_color_randomize_and_regen(st);
+            freerange_regen_transition(st, POINGO_MODE_KEEP, NULL, NULL);
         } else if (key == KEY_SPACE) {
             st->ghost_mode = !st->ghost_mode;
             g_ghost_mute = st->ghost_mode;

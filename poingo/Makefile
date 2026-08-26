@@ -34,7 +34,7 @@ CFLAGS := -std=c11 -Wall -Wextra -Wshadow -pedantic -D_GNU_SOURCE -D_DEFAULT_SOU
           -I$(CURDIR) -I$(RINGMENU_DIR) -I$(TOYAUDIO_DIR) -I$(GHOSTICON_DIR) $(WAYLAND_CFLAGS) $(TOY_AUDIO_PIPEWIRE_CFLAGS)
 LDFLAGS := $(WAYLAND_LIBS) $(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
-.PHONY: all clean run debug icons install uninstall install-user uninstall-user
+.PHONY: all clean run debug icons install uninstall install-user uninstall-user test
 
 all: $(TARGETS)
 
@@ -65,6 +65,27 @@ icons: icon_maker
 
 debug: CFLAGS += -O0 -g
 debug: all
+
+# Headless tests: test_poingo.c includes poingo.c directly, so nothing here
+# opens a display. The plain build covers physics and the command line; the
+# ThreadSanitizer build is what catches the regeneration races.
+TEST_DEPS := test_poingo.c poingo.c xdg-shell-client-protocol.h \
+	xdg-decoration-unstable-v1-client-protocol.h \
+	$(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
+
+test: test_poingo test_poingo_tsan
+	./test_poingo
+	./test_poingo_tsan
+
+test_poingo: $(TEST_DEPS)
+	$(CC) $(CFLAGS) -g test_poingo.c xdg-shell-protocol.c \
+		xdg-decoration-unstable-v1-protocol.c \
+		$(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) -o $@ $(LDFLAGS)
+
+test_poingo_tsan: $(TEST_DEPS)
+	$(CC) $(CFLAGS) -g -fsanitize=thread test_poingo.c xdg-shell-protocol.c \
+		xdg-decoration-unstable-v1-protocol.c \
+		$(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB) -o $@ $(LDFLAGS)
 
 run: poingo
 	./poingo
@@ -135,7 +156,7 @@ poingo.o: xdg-shell-client-protocol.h xdg-decoration-unstable-v1-client-protocol
 	$(TOYAUDIO_DIR)/toy_audio.h $(TOYAUDIO_DIR)/toy_audio_stream.h
 
 clean:
-	$(RM) $(TARGETS) $(POINGO_SRC:.c=.o) $(ICON_SRC:.c=.o) $(LODEPNG_LIB) $(ICON_BMPS) $(ICON_PNGS)
+	$(RM) $(TARGETS) test_poingo test_poingo_tsan $(POINGO_SRC:.c=.o) $(ICON_SRC:.c=.o) $(LODEPNG_LIB) $(ICON_BMPS) $(ICON_PNGS)
 	$(RM) poingo_*.png xdg-*.h xdg-*.c
 	$(RM) -rf third_party/sysroot
 
