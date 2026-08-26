@@ -103,6 +103,10 @@ icon_maker: icon_maker.o $(LODEPNG_LIB)
 icons: icon_maker
 	./icon_maker assets
 
+# Ace installs user-locally. `install-user` is the supported route; it needs
+# no sudo and keeps the toy, its desktop entry and its icons under $(HOME).
+# The `install` target below writes to $(PREFIX) and is kept only for
+# packagers -- do not use it on a working machine.
 install: $(TARGET) icons ace-install
 	install -Dm755 $(TARGET) "$(DESTDIR)$(BINDIR)/$(TARGET)"
 	install -Dm644 balloons.desktop "$(DESTDIR)$(DATADIR)/applications/balloons.desktop"

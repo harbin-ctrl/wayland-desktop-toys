@@ -2,7 +2,9 @@
 # Libraries build first; each toy also delegates to its libraries on its
 # own, so a toy still builds standalone, but building libs up front keeps
 # a parallel (make -jN) build correct and free of duplicate work.
-
+#
+# Ace installs user-locally: `make install-user`, never `sudo make
+# install`. See the install section below.
 
 ifeq ($(origin CC),default)
 CC := ccache gcc
@@ -49,6 +51,11 @@ clean:
 
 # Install/uninstall are toy-only; the toys pull in the shared Ace
 # menu category through ace-packaging/install.mk themselves.
+#
+# Ace is installed user-locally, not to the system: `make install-user`
+# puts everything under $(HOME) and needs no sudo. `install` writes to
+# $(PREFIX) and exists for packagers only -- do not run it on a working
+# machine, where a stale system copy silently shadows the user one.
 install install-user uninstall uninstall-user:
 	@for d in $(TOYS); do $(MAKE) -C $$d $@; done
 

@@ -100,6 +100,10 @@ test_engine: test_engine.c paint.c spraycan.h \
 		$(TOYAUDIO_LIB) $(GHOSTICON_LIB) -o $@ $(WAYLAND_LIBS) \
 		$(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
+# Ace installs user-locally. `install-user` is the supported route; it needs
+# no sudo and keeps the toy, its desktop entry and its icons under $(HOME).
+# The `install` target below writes to $(PREFIX) and is kept only for
+# packagers -- do not use it on a working machine.
 install: paint icons ace-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"
 	install -m 755 paint "$(DESTDIR)$(PREFIX)/bin/paint"

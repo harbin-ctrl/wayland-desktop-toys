@@ -87,6 +87,10 @@ test_poingo_tsan: $(TEST_DEPS)
 run: poingo
 	./poingo
 
+# Ace installs user-locally. `install-user` is the supported route; it needs
+# no sudo and keeps the toy, its desktop entry and its icons under $(HOME).
+# The `install` target below writes to $(PREFIX) and is kept only for
+# packagers -- do not use it on a working machine.
 install: poingo icon_maker icons ace-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"
 	install -m 755 poingo "$(DESTDIR)$(PREFIX)/bin/poingo"
