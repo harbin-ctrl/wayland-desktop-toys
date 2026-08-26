@@ -6174,52 +6174,98 @@ static int run_freerange_wayland(bool start_muted) {
 
 
 
-int main(int argc, char *argv[]) {
-    bool start_muted = false;
+/* Outcome of the command line, so main() can tell "run" from "print help and
+   stop" from "the user made a mistake". */
+typedef enum {
+    POINGO_ARGS_RUN,
+    POINGO_ARGS_DONE,
+    POINGO_ARGS_ERROR,
+} PoingoArgsResult;
+
+static void poingo_print_usage(const char *program) {
+    printf("Usage: %s [options]\n", program);
+    printf("Options:\n");
+    printf("  --mute                Start with audio muted\n");
+    printf("  --light-color <color> Set the light ball color (format: R,G,B or #RRGGBB)\n");
+    printf("  --dark-color <color>  Set the dark ball color (format: R,G,B or #RRGGBB)\n");
+    printf("  --start-size <scale>  Set initial ball size (%.2f to %.2f)\n",
+           (double)FREEDOM_BALL_SCALE_MIN, (double)FREEDOM_BALL_SCALE_MAX);
+    printf("  --audit-predict       Count expected and predicted impacts\n");
+    printf("  --debug               Write performance diagnostics\n");
+    printf("  --help, -h            Show this help message\n");
+}
+
+/* The value that follows an option, or NULL when the option was written
+   last with nothing after it. */
+static const char *poingo_option_value(int argc, char *argv[], int *i) {
+    if (*i + 1 >= argc) {
+        fprintf(stderr, "Missing value for %s\n", argv[*i]);
+        return NULL;
+    }
+    return argv[++(*i)];
+}
+
+static PoingoArgsResult poingo_parse_args(int argc, char *argv[], bool *start_muted) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [options]\n", argv[0]);
-            printf("Options:\n");
-            printf("  --mute                Start with audio muted\n");
-            printf("  --light-color <color> Set the light ball color (format: R,G,B or #RRGGBB)\n");
-            printf("  --dark-color <color>  Set the dark ball color (format: R,G,B or #RRGGBB)\n");
-            printf("  --start-size <scale>  Set initial ball size (0.25 to 2.0)\n");
-            printf("  --audit-predict       Count expected and predicted impacts\n");
-            printf("  --debug               Write performance diagnostics\n");
-            printf("  --help, -h            Show this help message\n");
-            return 0;
+            poingo_print_usage(argv[0]);
+            return POINGO_ARGS_DONE;
         } else if (strcmp(argv[i], "--mute") == 0 || strcmp(argv[i], "-mute") == 0 || strcmp(argv[i], "mute") == 0) {
-            start_muted = true;
-        } else if (strcmp(argv[i], "--light-color") == 0 && i + 1 < argc) {
-            if (!parse_color_arg(argv[i + 1], g_color_light_rgb)) {
+            *start_muted = true;
+        } else if (strcmp(argv[i], "--light-color") == 0) {
+            const char *value = poingo_option_value(argc, argv, &i);
+            if (!value || !parse_color_arg(value, g_color_light_rgb)) {
                 fprintf(stderr, "Invalid --light-color (use #RRGGBB or R,G,B)\n");
-                return 1;
+                return POINGO_ARGS_ERROR;
             }
-            i++;
-        } else if (strcmp(argv[i], "--dark-color") == 0 && i + 1 < argc) {
-            if (!parse_color_arg(argv[i + 1], g_color_dark_rgb)) {
+        } else if (strcmp(argv[i], "--dark-color") == 0) {
+            const char *value = poingo_option_value(argc, argv, &i);
+            if (!value || !parse_color_arg(value, g_color_dark_rgb)) {
                 fprintf(stderr, "Invalid --dark-color (use #RRGGBB or R,G,B)\n");
-                return 1;
+                return POINGO_ARGS_ERROR;
             }
-            i++;
-        } else if (strcmp(argv[i], "--start-size") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--start-size") == 0) {
+            const char *value_text = poingo_option_value(argc, argv, &i);
             char *end = NULL;
-            double value = strtod(argv[i + 1], &end);
-            if (!end || *end != '\0' ||
+            /* strtod("nan") succeeds and consumes the whole string, and every
+               comparison against a NaN is false -- so without the isfinite
+               check the range test lets it through and it goes on to poison
+               the ball geometry. */
+            double value = value_text ? strtod(value_text, &end) : 0.0;
+            if (!value_text || end == value_text || *end != '\0' ||
+                !isfinite(value) ||
                 value < FREEDOM_BALL_SCALE_MIN ||
                 value > FREEDOM_BALL_SCALE_MAX) {
                 fprintf(stderr, "Invalid --start-size (use %.2f to %.2f)\n",
                         (double)FREEDOM_BALL_SCALE_MIN,
                         (double)FREEDOM_BALL_SCALE_MAX);
-                return 1;
+                return POINGO_ARGS_ERROR;
             }
             g_freerange_ball_scale = (float)value;
-            i++;
         } else if (strcmp(argv[i], "--debug") == 0) {
             g_debug_mode = true;
         } else if (strcmp(argv[i], "--audit-predict") == 0) {
             g_predict_audit = true;
+        } else {
+            /* Silently ignoring a typo makes a broken launcher entry look
+               like it worked. */
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            poingo_print_usage(argv[0]);
+            return POINGO_ARGS_ERROR;
         }
+    }
+
+    return POINGO_ARGS_RUN;
+}
+
+int main(int argc, char *argv[]) {
+    bool start_muted = false;
+    PoingoArgsResult args = poingo_parse_args(argc, argv, &start_muted);
+    if (args == POINGO_ARGS_DONE) {
+        return 0;
+    }
+    if (args == POINGO_ARGS_ERROR) {
+        return 1;
     }
 
     const char *wayland_display_env = getenv("WAYLAND_DISPLAY");

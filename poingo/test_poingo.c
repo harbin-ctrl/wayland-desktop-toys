@@ -103,6 +103,64 @@ static void test_damping_does_not_overshoot(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Command line                                                        */
+/* ------------------------------------------------------------------ */
+
+static PoingoArgsResult parse(const char *a, const char *b) {
+    char *argv[3];
+    int argc = 1;
+    argv[0] = (char *)"poingo";
+    if (a) {
+        argv[argc++] = (char *)a;
+    }
+    if (b) {
+        argv[argc++] = (char *)b;
+    }
+    bool muted = false;
+    return poingo_parse_args(argc, argv, &muted);
+}
+
+static void test_cli_rejects_bad_input(void) {
+    float saved_scale = g_freerange_ball_scale;
+    /* Usage text and diagnostics are expected here; keep them out of the
+       test log so a real failure stands out. */
+    int saved_out = dup(STDOUT_FILENO);
+    int saved_err = dup(STDERR_FILENO);
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+    }
+
+    CHECK(parse("--start-size", "1.0") == POINGO_ARGS_RUN, "valid --start-size rejected");
+    CHECK(g_freerange_ball_scale == 1.0f, "valid --start-size not applied");
+
+    CHECK(parse("--start-size", "nan") == POINGO_ARGS_ERROR, "--start-size nan accepted");
+    CHECK(parse("--start-size", "inf") == POINGO_ARGS_ERROR, "--start-size inf accepted");
+    CHECK(parse("--start-size", "2.0") == POINGO_ARGS_ERROR, "--start-size above max accepted");
+    CHECK(parse("--start-size", NULL) == POINGO_ARGS_ERROR, "--start-size with no value accepted");
+    CHECK(parse("--light-color", NULL) == POINGO_ARGS_ERROR, "--light-color with no value accepted");
+    CHECK(parse("--dark-color", NULL) == POINGO_ARGS_ERROR, "--dark-color with no value accepted");
+    CHECK(parse("--start-szie", "1.0") == POINGO_ARGS_ERROR, "unknown option accepted");
+    CHECK(parse("garbage", NULL) == POINGO_ARGS_ERROR, "stray operand accepted");
+
+    CHECK(parse("--mute", NULL) == POINGO_ARGS_RUN, "--mute rejected");
+    CHECK(parse("--help", NULL) == POINGO_ARGS_DONE, "--help did not stop");
+
+    fflush(stdout);
+    fflush(stderr);
+    if (devnull >= 0) {
+        dup2(saved_out, STDOUT_FILENO);
+        dup2(saved_err, STDERR_FILENO);
+        close(devnull);
+    }
+    close(saved_out);
+    close(saved_err);
+
+    g_freerange_ball_scale = saved_scale;
+}
+
+/* ------------------------------------------------------------------ */
 /* Regeneration lifecycle                                              */
 /* ------------------------------------------------------------------ */
 
@@ -213,6 +271,7 @@ int main(void) {
 
     test_fast_ball_stays_in_window();
     test_damping_does_not_overshoot();
+    test_cli_rejects_bad_input();
     test_regen_shutdown_joins_workers();
     test_color_change_joins_before_palette();
     test_regen_survives_worker_failure();
