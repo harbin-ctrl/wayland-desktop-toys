@@ -12,7 +12,7 @@ TARGET  := balloons
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
 RINGMENU_LIB := $(RINGMENU_DIR)/libringmenu.a
 TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
-DESKTOP_TOYS_DIR ?= $(CURDIR)/../desktop-toys-packaging
+ACE_DIR ?= $(CURDIR)/../ace-packaging
 TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
 include $(TOYAUDIO_DIR)/pipewire.mk
 CFLAGS  += $(TOY_AUDIO_PIPEWIRE_CFLAGS)
@@ -92,9 +92,9 @@ ICON_SIZES    := 16 32 48 64 128 256 512
 
 DATADIR := $(PREFIX)/share
 
-include $(DESKTOP_TOYS_DIR)/install.mk
+include $(ACE_DIR)/install.mk
 
-# System install: binary plus the desktop entry, Desktop Toys menu and
+# System install: binary plus the desktop entry, Ace menu and
 # every icon size — the same set the user install ships, like splat.
 icon_maker.o: CFLAGS := -O3 -Wall -I$(CURDIR)/../third_party/lodepng
 icon_maker: icon_maker.o $(LODEPNG_LIB)
@@ -103,7 +103,7 @@ icon_maker: icon_maker.o $(LODEPNG_LIB)
 icons: icon_maker
 	./icon_maker assets
 
-install: $(TARGET) icons desktop-toys-install
+install: $(TARGET) icons ace-install
 	install -Dm755 $(TARGET) "$(DESTDIR)$(BINDIR)/$(TARGET)"
 	install -Dm644 balloons.desktop "$(DESTDIR)$(DATADIR)/applications/balloons.desktop"
 	for size in $(ICON_SIZES); do \
@@ -113,7 +113,7 @@ install: $(TARGET) icons desktop-toys-install
 	update-desktop-database "$(DESTDIR)$(DATADIR)/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -t -q "$(DESTDIR)$(DATADIR)/icons/hicolor" 2>/dev/null || true
 
-uninstall: desktop-toys-uninstall
+uninstall: ace-uninstall
 	$(RM) "$(DESTDIR)$(BINDIR)/$(TARGET)"
 	$(RM) "$(DESTDIR)$(DATADIR)/applications/balloons.desktop"
 	for size in $(ICON_SIZES); do \
@@ -122,7 +122,7 @@ uninstall: desktop-toys-uninstall
 	update-desktop-database "$(DESTDIR)$(DATADIR)/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -t -q "$(DESTDIR)$(DATADIR)/icons/hicolor" 2>/dev/null || true
 
-install-user: $(TARGET) icons desktop-toys-install-user
+install-user: $(TARGET) icons ace-install-user
 	install -d "$(HOME)/.local/bin"
 	install -m 755 $(TARGET) "$(HOME)/.local/bin/$(TARGET)"
 	install -d "$(HOME)/.local/share/applications"
@@ -134,22 +134,22 @@ install-user: $(TARGET) icons desktop-toys-install-user
 	done
 	install -d "$(HOME)/.local/share/pixmaps"
 	install -m 644 assets/icon_256x256.png "$(HOME)/.local/share/pixmaps/balloons.png"
-	install -m 644 $(DESKTOP_TOYS_DIR)/desktop-toys-icon-256.png "$(HOME)/.local/share/pixmaps/desktop-toys.png"
+	install -m 644 $(ACE_DIR)/ace-icon-256.png "$(HOME)/.local/share/pixmaps/ace.png"
 	install -d "$(HOME)/.icons"
 	install -m 644 assets/icon_256x256.png "$(HOME)/.icons/balloons.png"
-	install -m 644 $(DESKTOP_TOYS_DIR)/desktop-toys-icon-256.png "$(HOME)/.icons/desktop-toys.png"
+	install -m 644 $(ACE_DIR)/ace-icon-256.png "$(HOME)/.icons/ace.png"
 	update-desktop-database "$(HOME)/.local/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -t -q "$(HOME)/.local/share/icons/hicolor" 2>/dev/null || true
 
-uninstall-user: desktop-toys-uninstall-user
+uninstall-user: ace-uninstall-user
 	$(RM) "$(HOME)/.local/bin/$(TARGET)"
 	$(RM) "$(HOME)/.local/share/applications/balloons.desktop"
 	for size in $(ICON_SIZES); do \
 		$(RM) "$(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/balloons.png"; \
 	done
 	$(RM) "$(HOME)/.local/share/pixmaps/balloons.png"
-	$(RM) "$(HOME)/.local/share/pixmaps/desktop-toys.png"
+	$(RM) "$(HOME)/.local/share/pixmaps/ace.png"
 	$(RM) "$(HOME)/.icons/balloons.png"
-	$(RM) "$(HOME)/.icons/desktop-toys.png"
+	$(RM) "$(HOME)/.icons/ace.png"
 	update-desktop-database "$(HOME)/.local/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -t -q "$(HOME)/.local/share/icons/hicolor" 2>/dev/null || true

@@ -5,7 +5,7 @@ CCACHE_PREFIX ?= distcc
 export CC CCACHE_PREFIX
 TARGETS := poingo icon_maker
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
-DESKTOP_TOYS_DIR ?= $(CURDIR)/../desktop-toys-packaging
+ACE_DIR ?= $(CURDIR)/../ace-packaging
 RINGMENU_LIB := $(RINGMENU_DIR)/libringmenu.a
 TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
 TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
@@ -20,7 +20,7 @@ ICON_PNGS := $(addprefix icon_,$(addsuffix .png,$(ICON_SIZES)))
 PREFIX ?= /usr/local
 PKG_CONFIG ?= pkg-config
 
-include $(DESKTOP_TOYS_DIR)/install.mk
+include $(ACE_DIR)/install.mk
 include $(TOYAUDIO_DIR)/pipewire.mk
 
 # Poingo uses Wayland, EGL/GLES, and xkbcommon.
@@ -87,7 +87,7 @@ test_poingo_tsan: $(TEST_DEPS)
 run: poingo
 	./poingo
 
-install: poingo icon_maker icons desktop-toys-install
+install: poingo icon_maker icons ace-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"
 	install -m 755 poingo "$(DESTDIR)$(PREFIX)/bin/poingo"
 	install -m 755 poingo-logged "$(DESTDIR)$(PREFIX)/bin/poingo-logged"
@@ -102,7 +102,7 @@ install: poingo icon_maker icons desktop-toys-install
 	update-desktop-database "$(DESTDIR)$(PREFIX)/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(DESTDIR)$(PREFIX)/share/icons/hicolor" 2>/dev/null || true
 
-install-user: poingo icon_maker icons desktop-toys-install-user
+install-user: poingo icon_maker icons ace-install-user
 	install -d "$(HOME)/.local/bin"
 	install -m 755 poingo "$(HOME)/.local/bin/poingo"
 	install -m 755 poingo-logged "$(HOME)/.local/bin/poingo-logged"
@@ -117,7 +117,7 @@ install-user: poingo icon_maker icons desktop-toys-install-user
 	update-desktop-database "$(HOME)/.local/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(HOME)/.local/share/icons/hicolor" 2>/dev/null || true
 
-uninstall: desktop-toys-uninstall
+uninstall: ace-uninstall
 	$(RM) "$(DESTDIR)$(PREFIX)/bin/poingo"
 	$(RM) "$(DESTDIR)$(PREFIX)/share/applications/poingo.desktop"
 	for size in $(ICON_SIZES); do \
@@ -126,7 +126,7 @@ uninstall: desktop-toys-uninstall
 	update-desktop-database "$(DESTDIR)$(PREFIX)/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(DESTDIR)$(PREFIX)/share/icons/hicolor" 2>/dev/null || true
 
-uninstall-user: desktop-toys-uninstall-user
+uninstall-user: ace-uninstall-user
 	$(RM) "$(HOME)/.local/bin/poingo"
 	$(RM) "$(HOME)/.local/share/applications/poingo.desktop"
 	for size in $(ICON_SIZES); do \

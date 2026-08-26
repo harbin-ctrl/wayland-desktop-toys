@@ -5,7 +5,7 @@ CCACHE_PREFIX ?= distcc
 export CC CCACHE_PREFIX
 RINGMENU_DIR ?= $(CURDIR)/../ring-menu
 TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
-DESKTOP_TOYS_DIR ?= $(CURDIR)/../desktop-toys-packaging
+ACE_DIR ?= $(CURDIR)/../ace-packaging
 RINGMENU_LIB := $(RINGMENU_DIR)/libringmenu.a
 TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
 PAINT_SRC := paint.c xdg-shell-protocol.c
@@ -23,7 +23,7 @@ ICON_PNGS := $(addprefix icon_,$(addsuffix .png,$(ICON_SIZES)))
 PREFIX ?= /usr/local
 PKG_CONFIG ?= pkg-config
 
-include $(DESKTOP_TOYS_DIR)/install.mk
+include $(ACE_DIR)/install.mk
 include $(TOYAUDIO_DIR)/pipewire.mk
 
 # Spray is a pure-Wayland client: Wayland + EGL/GLES for the overlay and
@@ -100,7 +100,7 @@ test_engine: test_engine.c paint.c spraycan.h \
 		$(TOYAUDIO_LIB) $(GHOSTICON_LIB) -o $@ $(WAYLAND_LIBS) \
 		$(TOY_AUDIO_PIPEWIRE_LIBS) -lm -lpthread
 
-install: paint icons desktop-toys-install
+install: paint icons ace-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"
 	install -m 755 paint "$(DESTDIR)$(PREFIX)/bin/paint"
 	install -d "$(DESTDIR)$(PREFIX)/share/applications"
@@ -113,7 +113,7 @@ install: paint icons desktop-toys-install
 	update-desktop-database "$(DESTDIR)$(PREFIX)/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(DESTDIR)$(PREFIX)/share/icons/hicolor" 2>/dev/null || true
 
-install-user: paint icons desktop-toys-install-user
+install-user: paint icons ace-install-user
 	install -d "$(HOME)/.local/bin"
 	install -m 755 paint "$(HOME)/.local/bin/paint"
 	install -d "$(HOME)/.local/share/applications"

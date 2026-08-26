@@ -1,4 +1,4 @@
-Wayland Desktop Toys — improvement list
+Ace — improvement list
 
 1. Keep the Paint offscreen test healthy. [DONE]
    The test target must include every shared header and library it needs.
@@ -31,6 +31,6 @@ Wayland Desktop Toys — improvement list
    investigating runtime-randomness bugs.
 
 8. Make shared packaging safer. [DONE]
-   Uninstalling one toy should not remove the shared Desktop Toys menu/category
+   Uninstalling one toy should not remove the shared Ace menu/category
    files while other toys are still installed. Use ownership tracking or a
    separate shared package.

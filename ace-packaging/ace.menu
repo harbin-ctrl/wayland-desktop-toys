@@ -3,10 +3,10 @@
 <Menu>
   <Name>Applications</Name>
   <Menu>
-    <Name>DesktopToys</Name>
-    <Directory>DesktopToys.directory</Directory>
+    <Name>Ace</Name>
+    <Directory>Ace.directory</Directory>
     <Include>
-      <Category>DesktopToy</Category>
+      <Category>Ace</Category>
     </Include>
   </Menu>
 </Menu>

@@ -51,8 +51,8 @@ Needs Wayland + EGL/GLESv2 and PipeWire development packages, plus
 `wayland-scanner`. The native PipeWire spray-can hiss is managed by
 `libtoyaudio`. Also expects the shared library
 checkouts `~/ring-menu` (the circular menu) and
-`~/desktop-toys-packaging` (the Desktop Toys menu category); override with
-`RINGMENU_DIR=` / `DESKTOP_TOYS_DIR=`.
+`~/ace-packaging` (the Ace menu category); override with
+`RINGMENU_DIR=` / `ACE_DIR=`.
 
     make            # paint + the paintbrush icons
     make run

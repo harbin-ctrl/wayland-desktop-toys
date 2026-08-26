@@ -1,4 +1,4 @@
-# Wayland Desktop Toys
+# Ace
 
 Three interactive desktop toys for Wayland.  Coded, tested, and optimized on a Raspberry Pi 400, but they will run on any modern Linux Wayland system.
 

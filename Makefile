@@ -1,7 +1,8 @@
-# Wayland Desktop Toys — one package: the shared libraries and the toys that
-# link them. Libraries build first; each toy also delegates to its libraries
-# on its own, so a toy still builds standalone, but building libs up front
-# keeps a parallel (make -jN) build correct and free of duplicate work.
+# Ace — one package: the shared libraries and the toys that link them.
+# Libraries build first; each toy also delegates to its libraries on its
+# own, so a toy still builds standalone, but building libs up front keeps
+# a parallel (make -jN) build correct and free of duplicate work.
+
 
 ifeq ($(origin CC),default)
 CC := ccache gcc
@@ -13,7 +14,7 @@ CCACHE_PREFIX ?= distcc
 export CC CXX CCACHE_PREFIX
 
 # Shared libraries (built here; toys reference them as ../<name> siblings).
-# desktop-toys-packaging ships only assets + install.mk, so it is not built.
+# ace-packaging ships only assets + install.mk, so it is not built.
 LIBS := toy-audio ring-menu third_party/lodepng shared
 
 # The interactive toys.
@@ -46,8 +47,8 @@ $(TOYS): libs
 clean:
 	@for d in $(LIBS) $(TOYS); do $(MAKE) -C $$d clean; done
 
-# Install/uninstall are toy-only; the toys pull in the shared Desktop Toys
-# menu category through desktop-toys-packaging/install.mk themselves.
+# Install/uninstall are toy-only; the toys pull in the shared Ace
+# menu category through ace-packaging/install.mk themselves.
 install install-user uninstall uninstall-user:
 	@for d in $(TOYS); do $(MAKE) -C $$d $@; done
 
