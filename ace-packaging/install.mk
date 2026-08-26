@@ -20,7 +20,7 @@
 ACE_SAVED_GOAL := $(.DEFAULT_GOAL)
 
 ACE_ICON_SIZES := 16 22 24 32 48 64 128 256 512
-ACE_TOYS := paint poingo balloons
+ACE_TOYS := splat poingo balloons
 ACE_OWNER := $(notdir $(CURDIR))
 
 .PHONY: ace-install ace-install-user \

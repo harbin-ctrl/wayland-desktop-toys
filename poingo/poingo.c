@@ -2099,7 +2099,7 @@ typedef struct {
     int             regen_units_uploaded;
     bool shutdown_pending;
     /* Exit fade: seconds remaining of the 0.5s alpha ramp that replaced
-     * the regen/dissolve on quit, matching balloons and paint. */
+     * the regen/dissolve on quit, matching balloons and splat. */
     float exit_fade;
     bool ball_cleared;
     uint32_t shutdown_start_ticks;
@@ -2888,7 +2888,7 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
     }
     /* Fade out rather than running the clear/regen dissolve. The regen is
      * still used for colour changes; it is only the exit that fades, so quit
-     * looks the same as balloons and paint.
+     * looks the same as balloons and splat.
      *
      * Deliberately does NOT set ball_cleared: that flag skips
      * update_ball_physics, which would freeze the ball in mid-air for the

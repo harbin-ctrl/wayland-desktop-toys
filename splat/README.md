@@ -1,7 +1,7 @@
-# Paint
+# Splat
 
-A paint desktop toy for Wayland — spray-wayland and splat-wayland recombined
-into the one program they always wanted to be.
+A painting desktop toy for Wayland — spray-wayland and splat-wayland
+recombined into the one program they always wanted to be.
 
 Runs as a borderless, fully transparent fullscreen overlay on top of your
 desktop, with two tools sharing one canvas:
@@ -54,7 +54,7 @@ checkouts `~/ring-menu` (the circular menu) and
 `~/ace-packaging` (the Ace menu category); override with
 `RINGMENU_DIR=` / `ACE_DIR=`.
 
-    make            # paint + the paintbrush icons
+    make            # splat + the paintbrush icons
     make run
     make test       # offscreen engine test: sprays, splats, layering,
                     # erasing, cursors — writes PNGs and checks the models

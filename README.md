@@ -4,7 +4,7 @@ Three interactive desktop toys for Wayland.  Coded, tested, and optimized on a R
 
 ## Included Toys
 
-1. **Paint** (`paint`): transparent fullscreen paint overlay with two
+1. **Splat** (`splat`): transparent fullscreen paint overlay with two
    tools on one canvas — SPLAT throws flat glossy enamel blobs, SPRAY is your own graffiti-ready spraycan!
 2. **Poingo** (`poingo`): a ball bounces around your desktop with
    a crashing boing sound.  Retro memories!

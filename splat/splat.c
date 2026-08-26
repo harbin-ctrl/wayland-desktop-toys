@@ -1252,8 +1252,8 @@ static void hiss_render(void *userdata, float *output,
 static bool hiss_start(void) {
     toy_hiss_init(&g_hiss.synth);
     ToyAudioStreamConfig stream_config = {
-        .name = "paint-hiss",
-        .description = "Paint Spray",
+        .name = "splat-hiss",
+        .description = "Splat Spray",
         .sample_rate = HISS_RATE,
         .channels = 1,
         .render = hiss_render,
@@ -1261,7 +1261,7 @@ static bool hiss_start(void) {
     };
     g_hiss.stream = toy_audio_stream_start(&stream_config);
     if (!g_hiss.stream) {
-        fprintf(stderr, "Paint: failed to start PipeWire audio; quitting.\n");
+        fprintf(stderr, "Splat: failed to start PipeWire audio; quitting.\n");
         return false;
     }
     g_hiss.running = true;
@@ -1578,7 +1578,7 @@ static bool create_cursor(PaintState *st) {
 
     int stride = CURSOR_BUF * 4;
     size_t bytes = (size_t)stride * CURSOR_BUF;
-    int fd = memfd_create("paint-cursor", MFD_CLOEXEC);
+    int fd = memfd_create("splat-cursor", MFD_CLOEXEC);
     if (fd < 0) return false;
     if (ftruncate(fd, (off_t)bytes) < 0) {
         close(fd);
@@ -1731,7 +1731,7 @@ static void set_paint_mode(PaintState *st, bool on) {
     st->frame_pending = true;   
     mark_dirty(st, 0, 0, st->width, st->height);
     update_input_region(st);
-    printf("Paint: %s\n", on ? "paint mode"
+    printf("Splat: %s\n", on ? "paint mode"
                              : "click-through mode (click the tool badge in "
                                "the top-right corner to paint again)");
     fflush(stdout);
@@ -2607,7 +2607,7 @@ int main(void) {
     st.display = wl_display_connect(NULL);
     if (!st.display) {
         fprintf(stderr, "Failed to connect to a Wayland display. "
-                        "Paint needs a running Wayland compositor.\n");
+                        "Splat needs a running Wayland compositor.\n");
         return 1;
     }
 
@@ -2636,8 +2636,8 @@ int main(void) {
     xdg_surface_add_listener(st.xdg_surface, &xdg_surface_listener, &st);
     st.xdg_toplevel = xdg_surface_get_toplevel(st.xdg_surface);
     xdg_toplevel_add_listener(st.xdg_toplevel, &toplevel_listener, &st);
-    xdg_toplevel_set_title(st.xdg_toplevel, "Paint");
-    xdg_toplevel_set_app_id(st.xdg_toplevel, "paint");
+    xdg_toplevel_set_title(st.xdg_toplevel, "Splat");
+    xdg_toplevel_set_app_id(st.xdg_toplevel, "splat");
     xdg_toplevel_set_maximized(st.xdg_toplevel);
 
     st.egl_window = wl_egl_window_create(st.surface, st.width, st.height);
@@ -2720,7 +2720,7 @@ int main(void) {
         return 1;
     }
 
-    printf("Paint running. SPLAT: click or drag to throw glossy paint blobs.\n"
+    printf("Splat running. SPLAT: click or drag to throw glossy paint blobs.\n"
            "SPRAY: hold the left button to mist (hold still to build up\n"
            "opacity). Scroll to change the tool\n"
            "size. Right-click for the menu (drag to a slot and release):\n"

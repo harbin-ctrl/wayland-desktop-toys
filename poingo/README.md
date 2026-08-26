@@ -69,7 +69,7 @@ Poingo requests interleaved 48 kHz floating-point stereo with an explicit
 `FL,FR` channel map. The shared DSP and mixer live in `libtoyaudio`; PipeWire is
 the device and latency-measurement layer.
 
-The sibling toys (paint, balloons) carry none of this: a spray hiss is a
+The sibling toys (splat, balloons) carry none of this: a spray hiss is a
 continuous stream and a balloon pop is fire-and-forget, so neither has a visual
 instant to hit, and a few milliseconds of slack is inaudible.
 

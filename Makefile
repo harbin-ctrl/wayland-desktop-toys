@@ -20,16 +20,16 @@ export CC CXX CCACHE_PREFIX
 LIBS := toy-audio ring-menu third_party/lodepng shared
 
 # The interactive toys.
-TOYS := paint poingo balloons
+TOYS := splat poingo balloons
 
 LINT_SOURCES := \
 	toy-audio/toy_audio.c \
 	ring-menu/ringmenu.c \
 	shared/ghost_icon.c \
-	paint/paint.c \
+	splat/splat.c \
 	poingo/poingo.c \
 	balloons/balloon_gen.c balloons/thunder_synth.c balloons/audio.c balloons/balloons.c
-LINT_INCLUDES := -Itoy-audio -Iring-menu -Ishared -Ipaint -Ipoingo -Iballoons -Ithird_party/lodepng
+LINT_INCLUDES := -Itoy-audio -Iring-menu -Ishared -Isplat -Ipoingo -Iballoons -Ithird_party/lodepng
 TIDY_SOURCES := $(addprefix $(CURDIR)/,$(LINT_SOURCES))
 
 .PHONY: all libs clean install uninstall install-user uninstall-user \

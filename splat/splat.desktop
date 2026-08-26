@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Splat
+Comment=Throw glossy paint blobs and spray on the screen
+Exec=splat
+Icon=splat
+Terminal=false
+Type=Application
+Categories=Ace;

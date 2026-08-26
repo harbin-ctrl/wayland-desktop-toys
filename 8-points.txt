@@ -1,11 +1,11 @@
 Ace — improvement list
 
-1. Keep the Paint offscreen test healthy. [DONE]
+1. Keep the Splat offscreen test healthy. [DONE]
    The test target must include every shared header and library it needs.
 
 2. Add automated CI.
    At minimum: GCC and Clang builds, AddressSanitizer/UndefinedBehaviorSanitizer,
-   Paint offscreen tests, deterministic thunder/asset hash tests, and a headless
+   Splat offscreen tests, deterministic thunder/asset hash tests, and a headless
    Weston compositor smoke test.
 
 3. Centralize the Wayland overlay lifecycle.

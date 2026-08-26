@@ -8,14 +8,14 @@ TOYAUDIO_DIR ?= $(CURDIR)/../toy-audio
 ACE_DIR ?= $(CURDIR)/../ace-packaging
 RINGMENU_LIB := $(RINGMENU_DIR)/libringmenu.a
 TOYAUDIO_LIB := $(TOYAUDIO_DIR)/libtoyaudio.a
-PAINT_SRC := paint.c xdg-shell-protocol.c
+SPLAT_SRC := splat.c xdg-shell-protocol.c
 ICON_SRC := icon_maker.c
 GHOSTICON_DIR := $(CURDIR)/../shared
 GHOSTICON_LIB := $(GHOSTICON_DIR)/libghosticon.a
 # lodepng is only for icon_maker, which encodes the .png desktop icons at
 # build time. The toy itself decodes nothing.
 LODEPNG_LIB := $(CURDIR)/../third_party/lodepng/liblodepng.a
-TARGETS := paint icon_maker
+TARGETS := splat icon_maker
 
 ICON_SIZES := 32 48 64 128 192 256 512 1024
 ICON_PNGS := $(addprefix icon_,$(addsuffix .png,$(ICON_SIZES)))
@@ -55,7 +55,7 @@ xdg-shell-client-protocol.h:
 xdg-shell-protocol.c:
 	$(WAYLAND_SCANNER) private-code $(WAYLAND_PROTOCOLS_DIR)/stable/xdg-shell/xdg-shell.xml $@
 
-paint.o: xdg-shell-client-protocol.h $(RINGMENU_DIR)/ringmenu.h \
+splat.o: xdg-shell-client-protocol.h $(RINGMENU_DIR)/ringmenu.h \
 		$(TOYAUDIO_DIR)/toy_audio.h $(TOYAUDIO_DIR)/toy_audio_stream.h \
 		$(GHOSTICON_DIR)/ghost_icon.h
 
@@ -69,7 +69,7 @@ $(GHOSTICON_LIB): FORCE
 	$(MAKE) -C $(GHOSTICON_DIR)
 FORCE:
 
-paint: $(PAINT_SRC:.c=.o) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
+splat: $(SPLAT_SRC:.c=.o) $(RINGMENU_LIB) $(TOYAUDIO_LIB) $(GHOSTICON_LIB)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 icon_maker.o: CFLAGS := -std=c99 -O2 -I$(CURDIR) -I$(CURDIR)/../third_party/lodepng
@@ -81,15 +81,15 @@ icon_maker: icon_maker.o $(LODEPNG_LIB)
 icons: icon_maker
 	./icon_maker
 
-run: paint
-	./paint
+run: splat
+	./splat
 
-# Offscreen engine test: includes paint.c directly and writes PNGs of a
+# Offscreen engine test: includes splat.c directly and writes PNGs of a
 # simulated session (spray, mixing, eraser, cursor art) plus checks.
 test: test_engine
 	cd $(CURDIR) && ./test_engine
 
-test_engine: test_engine.c paint.c spraycan.h \
+test_engine: test_engine.c splat.c spraycan.h \
 		xdg-shell-client-protocol.h $(RINGMENU_LIB) \
 		xdg-shell-protocol.o $(LODEPNG_LIB) $(TOYAUDIO_LIB) \
 		$(GHOSTICON_LIB)
@@ -104,38 +104,38 @@ test_engine: test_engine.c paint.c spraycan.h \
 # no sudo and keeps the toy, its desktop entry and its icons under $(HOME).
 # The `install` target below writes to $(PREFIX) and is kept only for
 # packagers -- do not use it on a working machine.
-install: paint icons ace-install
+install: splat icons ace-install
 	install -d "$(DESTDIR)$(PREFIX)/bin"
-	install -m 755 paint "$(DESTDIR)$(PREFIX)/bin/paint"
+	install -m 755 splat "$(DESTDIR)$(PREFIX)/bin/splat"
 	install -d "$(DESTDIR)$(PREFIX)/share/applications"
-	install -m 644 paint.desktop "$(DESTDIR)$(PREFIX)/share/applications/paint.desktop"
+	install -m 644 splat.desktop "$(DESTDIR)$(PREFIX)/share/applications/splat.desktop"
 	install -d "$(DESTDIR)$(PREFIX)/share/icons/hicolor"
 	for size in $(ICON_SIZES); do \
 		install -d "$(DESTDIR)$(PREFIX)/share/icons/hicolor/$${size}x$${size}/apps"; \
-		install -m 644 icon_$${size}.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/$${size}x$${size}/apps/paint.png"; \
+		install -m 644 icon_$${size}.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/$${size}x$${size}/apps/splat.png"; \
 	done
 	update-desktop-database "$(DESTDIR)$(PREFIX)/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(DESTDIR)$(PREFIX)/share/icons/hicolor" 2>/dev/null || true
 
-install-user: paint icons ace-install-user
+install-user: splat icons ace-install-user
 	install -d "$(HOME)/.local/bin"
-	install -m 755 paint "$(HOME)/.local/bin/paint"
+	install -m 755 splat "$(HOME)/.local/bin/splat"
 	install -d "$(HOME)/.local/share/applications"
-	install -m 644 paint.desktop "$(HOME)/.local/share/applications/paint.desktop"
+	install -m 644 splat.desktop "$(HOME)/.local/share/applications/splat.desktop"
 	install -d "$(HOME)/.local/share/icons/hicolor"
 	for size in $(ICON_SIZES); do \
 		install -d "$(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps"; \
-		install -m 644 icon_$${size}.png "$(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/paint.png"; \
+		install -m 644 icon_$${size}.png "$(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/splat.png"; \
 	done
 	update-desktop-database "$(HOME)/.local/share/applications" 2>/dev/null || true
 	test -f "$(HOME)/.local/share/icons/hicolor/index.theme" || cp /usr/share/icons/hicolor/index.theme "$(HOME)/.local/share/icons/hicolor/" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(HOME)/.local/share/icons/hicolor" 2>/dev/null || true
 
 uninstall: ace-uninstall
-	$(RM) "$(DESTDIR)$(PREFIX)/bin/paint"
-	$(RM) "$(DESTDIR)$(PREFIX)/share/applications/paint.desktop"
+	$(RM) "$(DESTDIR)$(PREFIX)/bin/splat"
+	$(RM) "$(DESTDIR)$(PREFIX)/share/applications/splat.desktop"
 	for size in $(ICON_SIZES); do \
-		$(RM) "$(DESTDIR)$(PREFIX)/share/icons/hicolor/$${size}x$${size}/apps/paint.png"; \
+		$(RM) "$(DESTDIR)$(PREFIX)/share/icons/hicolor/$${size}x$${size}/apps/splat.png"; \
 	done
 	update-desktop-database "$(DESTDIR)$(PREFIX)/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(DESTDIR)$(PREFIX)/share/icons/hicolor" 2>/dev/null || true
@@ -143,16 +143,16 @@ uninstall: ace-uninstall
 # index.theme is deliberately left: install-user only supplies it when the
 # user has no hicolor theme at all, and every other icon there needs it.
 uninstall-user: ace-uninstall-user
-	$(RM) "$(HOME)/.local/bin/paint"
-	$(RM) "$(HOME)/.local/share/applications/paint.desktop"
+	$(RM) "$(HOME)/.local/bin/splat"
+	$(RM) "$(HOME)/.local/share/applications/splat.desktop"
 	for size in $(ICON_SIZES); do \
-		$(RM) "$(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/paint.png"; \
+		$(RM) "$(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/splat.png"; \
 	done
 	update-desktop-database "$(HOME)/.local/share/applications" 2>/dev/null || true
 	gtk-update-icon-cache -f -q "$(HOME)/.local/share/icons/hicolor" 2>/dev/null || true
 
 clean:
-	$(RM) $(TARGETS) test_engine $(PAINT_SRC:.c=.o) icon_maker.o test_engine.o $(LODEPNG_LIB) $(ICON_PNGS)
+	$(RM) $(TARGETS) test_engine $(SPLAT_SRC:.c=.o) icon_maker.o test_engine.o $(LODEPNG_LIB) $(ICON_PNGS)
 	$(RM) xdg-shell-client-protocol.h xdg-shell-protocol.c
 	$(RM) test_*.png
 %.o: %.c

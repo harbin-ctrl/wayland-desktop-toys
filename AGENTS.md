@@ -1,7 +1,7 @@
 # Ace
 
 Ace is this project: the shared libraries (`toy-audio`, `ring-menu`, `shared`,
-`ace-packaging`) and the toys that link them (`paint`, `poingo`, `balloons`).
+`ace-packaging`) and the toys that link them (`splat`, `poingo`, `balloons`).
 The repository is `ace-toys`.
 
 - Ace is installed user-locally, never to the system. Use `make install-user`

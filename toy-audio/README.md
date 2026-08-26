@@ -1,6 +1,6 @@
 # toy-audio
 
-The shared audio core of the Ace toys (Poingo, Balloons, and Paint): the
+The shared audio core of the Ace toys (Poingo, Balloons, and Splat): the
 native PipeWire playback and latency layer, the thunder
 bounce synthesizer in both styles (Poingo rumble and the nostalgia
 struck-sheet boom with its hall reverb), the milliseconds-scale Schroeder
