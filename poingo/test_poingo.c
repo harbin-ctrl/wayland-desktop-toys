@@ -161,6 +161,27 @@ static void test_cli_rejects_bad_input(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Keyboard focus                                                      */
+/* ------------------------------------------------------------------ */
+
+/* Key repeat runs off key_*_pressed, which only a RELEASED event clears.
+   Losing focus mid-hold means that release never arrives. */
+static void test_keyboard_leave_clears_keys(void) {
+    FreedomState st = {0};
+    st.key_vol_up_pressed = true;
+    st.key_vol_down_pressed = true;
+    st.key_speed_up_pressed = true;
+    st.key_speed_down_pressed = true;
+
+    freerange_keyboard_leave(&st, NULL, 0, NULL);
+
+    CHECK(!st.key_vol_up_pressed, "vol up still held after focus loss");
+    CHECK(!st.key_vol_down_pressed, "vol down still held after focus loss");
+    CHECK(!st.key_speed_up_pressed, "speed up still held after focus loss");
+    CHECK(!st.key_speed_down_pressed, "speed down still held after focus loss");
+}
+
+/* ------------------------------------------------------------------ */
 /* Regeneration lifecycle                                              */
 /* ------------------------------------------------------------------ */
 
@@ -272,6 +293,7 @@ int main(void) {
     test_fast_ball_stays_in_window();
     test_damping_does_not_overshoot();
     test_cli_rejects_bad_input();
+    test_keyboard_leave_clears_keys();
     test_regen_shutdown_joins_workers();
     test_color_change_joins_before_palette();
     test_regen_survives_worker_failure();

@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <poll.h>
+#include <errno.h>
 #include <linux/memfd.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -3141,10 +3142,24 @@ static void freerange_request_graceful_shutdown(FreedomState *st) {
     audio_begin_shutdown_fade(POINGO_EXIT_FADE_SECONDS);
 }
 
+/* Returns 0 on failure. Without the status check a driver that rejects the
+   GLSL still links a do-nothing program, and Poingo opens as an empty
+   window -- which is close to undiagnosable from a bug report. */
 static GLuint freerange_gl_create_shader(const char *source, GLenum type) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, NULL);
     glCompileShader(shader);
+
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    if (!compiled) {
+        char log[512] = {0};
+        glGetShaderInfoLog(shader, sizeof(log) - 1, NULL, log);
+        fprintf(stderr, "Failed to compile %s shader: %s\n",
+                type == GL_VERTEX_SHADER ? "vertex" : "fragment", log);
+        glDeleteShader(shader);
+        return 0;
+    }
     return shader;
 }
 
@@ -3193,21 +3208,40 @@ static bool freerange_gl_init(FreedomState *st, const FreedomFrameSet *frames) {
 
     GLuint vert = freerange_gl_create_shader(freerange_vert_shader_text, GL_VERTEX_SHADER);
     GLuint frag = freerange_gl_create_shader(freerange_frag_shader_text, GL_FRAGMENT_SHADER);
+    if (!vert || !frag) {
+        glDeleteShader(vert);
+        glDeleteShader(frag);
+        return false;
+    }
 
     st->gl_program = glCreateProgram();
     glAttachShader(st->gl_program, vert);
     glAttachShader(st->gl_program, frag);
     glLinkProgram(st->gl_program);
-    glUseProgram(st->gl_program);
 
     glDeleteShader(vert);
     glDeleteShader(frag);
 
+    GLint linked = GL_FALSE;
+    glGetProgramiv(st->gl_program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[512] = {0};
+        glGetProgramInfoLog(st->gl_program, sizeof(log) - 1, NULL, log);
+        fprintf(stderr, "Failed to link GL program: %s\n", log);
+        return false;
+    }
+
+    glUseProgram(st->gl_program);
+
     st->gl_pos_loc = glGetAttribLocation(st->gl_program, "pos");
     st->gl_uv_loc = glGetAttribLocation(st->gl_program, "uv_in");
     st->gl_tex_loc = glGetUniformLocation(st->gl_program, "tex");
+    /* alpha carries the startup beam and the exit fade, so a missing location
+       is as fatal as a missing texture sampler. */
     st->gl_alpha_loc = glGetUniformLocation(st->gl_program, "alpha");
-    if (st->gl_pos_loc < 0 || st->gl_uv_loc < 0 || st->gl_tex_loc < 0) {
+    if (st->gl_pos_loc < 0 || st->gl_uv_loc < 0 || st->gl_tex_loc < 0 ||
+        st->gl_alpha_loc < 0) {
+        fprintf(stderr, "GL program is missing an expected attribute or uniform\n");
         return false;
     }
 
@@ -3673,31 +3707,50 @@ static void freerange_gl_draw_hud(FreedomState *st) {
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-static void freerange_pump_events(struct wl_display *display, int timeout_ms) {
+/* Returns false once the connection is gone, so the caller can wind down
+   instead of spinning on a dead socket. */
+static bool freerange_pump_events(struct wl_display *display, int timeout_ms) {
     if (!display) {
-        return;
+        return false;
     }
 
     while (wl_display_prepare_read(display) != 0) {
-        wl_display_dispatch_pending(display);
+        if (wl_display_dispatch_pending(display) < 0) {
+            return false;
+        }
     }
 
-    wl_display_flush(display);
+    /* The moving input region alone is many wl_region_add requests per frame,
+       so the outgoing buffer really can fill. EAGAIN means "not all of it
+       went"; waiting only for POLLIN there would sit on an unsent batch until
+       the timeout. Wait for writability too and let the next flush finish. */
+    short events = POLLIN;
+    if (wl_display_flush(display) < 0) {
+        if (errno != EAGAIN) {
+            wl_display_cancel_read(display);
+            return false;
+        }
+        events |= POLLOUT;
+    }
 
     struct pollfd pfd = {
         .fd = wl_display_get_fd(display),
-        .events = POLLIN,
+        .events = events,
         .revents = 0
     };
 
     int poll_result = poll(&pfd, 1, timeout_ms);
-    if (poll_result <= 0) {
+    if (poll_result < 0 && errno != EINTR) {
         wl_display_cancel_read(display);
-    } else {
-        wl_display_read_events(display);
+        return false;
+    }
+    if (poll_result <= 0 || !(pfd.revents & POLLIN)) {
+        wl_display_cancel_read(display);
+    } else if (wl_display_read_events(display) < 0) {
+        return false;
     }
 
-    wl_display_dispatch_pending(display);
+    return wl_display_dispatch_pending(display) >= 0;
 }
 
 static void freerange_update_input_region(struct wl_compositor *compositor,
@@ -4561,12 +4614,24 @@ static void freerange_keyboard_enter(void *data, struct wl_keyboard *keyboard,
     (void)keys;
 }
 
+/* Key repeat runs off these flags and only a RELEASED event clears them, but
+   a key held as focus leaves never sends one -- it would repeat forever. */
+static void freerange_clear_held_keys(FreedomState *st) {
+    if (!st) {
+        return;
+    }
+    st->key_vol_up_pressed = false;
+    st->key_vol_down_pressed = false;
+    st->key_speed_up_pressed = false;
+    st->key_speed_down_pressed = false;
+}
+
 static void freerange_keyboard_leave(void *data, struct wl_keyboard *keyboard,
                                    uint32_t serial, struct wl_surface *surface) {
-    (void)data;
     (void)keyboard;
     (void)serial;
     (void)surface;
+    freerange_clear_held_keys(data);
 }
 
 static void freerange_keyboard_key(void *data, struct wl_keyboard *keyboard,
@@ -4670,6 +4735,14 @@ static void freerange_seat_capabilities(void *data, struct wl_seat *seat, uint32
     if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && st->keyboard) {
         wl_keyboard_destroy(st->keyboard);
         st->keyboard = NULL;
+        /* The keys held when it vanished will never see a release. */
+        freerange_clear_held_keys(st);
+    }
+    /* The protocol asks clients to release the object whose capability has
+       gone, the pointer included. */
+    if (!(capabilities & WL_SEAT_CAPABILITY_POINTER) && st->pointer) {
+        wl_pointer_destroy(st->pointer);
+        st->pointer = NULL;
     }
 }
 
@@ -4690,22 +4763,34 @@ static void freerange_registry_global(void *data, struct wl_registry *registry,
     if (!st) {
         return;
     }
-    (void)version;
+    /* version is the highest the compositor supports, not the one to use.
+       Asking for more than it offers is a protocol error, and the client is
+       killed for it. */
+    #define BIND_VERSION(wanted) ((version) < (wanted) ? (version) : (uint32_t)(wanted))
 
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
-        st->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
+        st->compositor = wl_registry_bind(registry, name, &wl_compositor_interface,
+                                          BIND_VERSION(4));
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        st->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+        st->shm = wl_registry_bind(registry, name, &wl_shm_interface, BIND_VERSION(1));
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
-        st->seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
+        st->seat = wl_registry_bind(registry, name, &wl_seat_interface, BIND_VERSION(1));
         wl_seat_add_listener(st->seat, &freerange_seat_listener, st);
-    } else if (strcmp(interface, wl_output_interface.name) == 0) {
-        st->output = wl_registry_bind(registry, name, &wl_output_interface, 2);
+    } else if (strcmp(interface, wl_output_interface.name) == 0 && !st->output) {
+        /* Only the first. Poingo tracks a single output, and letting each new
+           one overwrite it leaked the previous proxy and made the mode report
+           that won -- and so target_fps -- depend on advertisement order on a
+           mixed-refresh desktop. */
+        st->output = wl_registry_bind(registry, name, &wl_output_interface,
+                                      BIND_VERSION(2));
         wl_output_add_listener(st->output, &freerange_output_listener, st);
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
-        st->wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
+        st->wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface,
+                                       BIND_VERSION(1));
         xdg_wm_base_add_listener(st->wm_base, &freerange_wm_base_listener, st);
     }
+
+    #undef BIND_VERSION
 }
 
 static void freerange_registry_global_remove(void *data, struct wl_registry *registry, uint32_t name) {
@@ -5048,9 +5133,7 @@ static int run_freerange_wayland(bool start_muted) {
         { .label = "GHOST", .led = RINGMENU_LED_OFF },
         { .label = "QUIT" },
     };
-    if (light_drop && dark_drop) {
-        g_menu = ringmenu_create(menu_items, POINGO_MENU_ITEMS);
-    }
+    g_menu = ringmenu_create(menu_items, POINGO_MENU_ITEMS);
     if (g_menu) {
         int menu_size = ringmenu_size(g_menu);
         /* Color-field mode renders a rectangle expanded from the menu's
@@ -5100,6 +5183,21 @@ static int run_freerange_wayland(bool start_muted) {
         if (wl_display_dispatch(st.display) < 0) {
             break;
         }
+    }
+    if (!st.configured) {
+        fprintf(stderr, "Never received the initial xdg_surface configure\n");
+        eglDestroySurface(st.egl_display, st.egl_surface);
+        wl_egl_window_destroy(st.egl_window);
+        xdg_toplevel_destroy(st.xdg_toplevel);
+        xdg_surface_destroy(st.xdg_surface);
+        wl_surface_destroy(st.surface);
+        eglDestroyContext(st.egl_display, st.egl_context);
+        eglTerminate(st.egl_display);
+        freerange_color_regen_shutdown(&st);
+        freerange_destroy_frames(&frames);
+        shutdown_audio();
+        wl_display_disconnect(st.display);
+        return 1;
     }
 
     if (st.resize_pending) {
@@ -5265,7 +5363,11 @@ static int run_freerange_wayland(bool start_muted) {
             clock_gettime(CLOCK_MONOTONIC, &_pe);
             pump_enter_ns = (uint64_t)_pe.tv_sec * 1000000000ULL + (uint64_t)_pe.tv_nsec;
         }
-        freerange_pump_events(st.display, 20);
+        if (!freerange_pump_events(st.display, 20)) {
+            /* The compositor is gone; there is nothing left to fade out to. */
+            st.running = false;
+            break;
+        }
         /*
          * After the pump, not inside any pointer callback: this is the
          * first point at which a leave that arrived alongside a deferred
@@ -6122,6 +6224,9 @@ static int run_freerange_wayland(bool start_muted) {
 
     if (st.pointer) {
         wl_pointer_destroy(st.pointer);
+    }
+    if (st.keyboard) {
+        wl_keyboard_destroy(st.keyboard);
     }
     if (st.seat) {
         wl_seat_destroy(st.seat);
