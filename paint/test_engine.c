@@ -74,7 +74,20 @@ int main(void) {
     st.splat_size = SPLAT_S_DEFAULT;
     for (size_t i = 0; i < PALETTE_SIZE; i++) st.palette[i] = DEFAULT_PALETTE[i];
     st.color_picker_slot = -1;
-    if (!st.canvas || !st.paint || !st.field || !st.color_map) return 1;
+    /* draw_splat() and splat_shade_region() both bail out unless their
+       scratch exists, exactly as main() allocates it -- the splat workspace
+       at startup, the shade buffers in canvas_resize(). Without them every
+       splat check below silently measured an untouched canvas. */
+    st.splat_own = calloc(SPLAT_SCRATCH_CAP, sizeof(*st.splat_own));
+    st.splat_vdist = malloc(SPLAT_SCRATCH_CAP * sizeof(*st.splat_vdist));
+    st.splat_vlabel = malloc(SPLAT_SCRATCH_CAP * sizeof(*st.splat_vlabel));
+    st.shade_scratch_cap = (size_t)TW * TH;
+    st.shade_dist_u = malloc(st.shade_scratch_cap * sizeof(float));
+    st.shade_dist_c = malloc(st.shade_scratch_cap * sizeof(float));
+    st.shade_dist_s = malloc(st.shade_scratch_cap * sizeof(float));
+    if (!st.canvas || !st.paint || !st.field || !st.color_map ||
+        !st.splat_own || !st.splat_vdist || !st.splat_vlabel ||
+        !st.shade_dist_u || !st.shade_dist_c || !st.shade_dist_s) return 1;
     memset(st.color_map, COLOR_NONE, (size_t)TW * TH);
     alpha_lut_init();
     srand(42);
