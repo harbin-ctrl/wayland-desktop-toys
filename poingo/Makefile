@@ -123,6 +123,8 @@ install-user: poingo icon_maker icons ace-install-user
 
 uninstall: ace-uninstall
 	$(RM) "$(DESTDIR)$(PREFIX)/bin/poingo"
+	$(RM) "$(DESTDIR)$(PREFIX)/bin/poingo-logged"
+	$(RM) "$(DESTDIR)$(PREFIX)/bin/poingo-audio-mark"
 	$(RM) "$(DESTDIR)$(PREFIX)/share/applications/poingo.desktop"
 	for size in $(ICON_SIZES); do \
 		$(RM) "$(DESTDIR)$(PREFIX)/share/icons/hicolor/$${size}x$${size}/apps/poingo.png"; \
@@ -132,6 +134,8 @@ uninstall: ace-uninstall
 
 uninstall-user: ace-uninstall-user
 	$(RM) "$(HOME)/.local/bin/poingo"
+	$(RM) "$(HOME)/.local/bin/poingo-logged"
+	$(RM) "$(HOME)/.local/bin/poingo-audio-mark"
 	$(RM) "$(HOME)/.local/share/applications/poingo.desktop"
 	for size in $(ICON_SIZES); do \
 		$(RM) "$(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/poingo.png"; \

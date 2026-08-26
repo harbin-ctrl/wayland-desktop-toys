@@ -57,7 +57,7 @@ clean:
 # $(PREFIX) and exists for packagers only -- do not run it on a working
 # machine, where a stale system copy silently shadows the user one.
 install install-user uninstall uninstall-user:
-	@for d in $(TOYS); do $(MAKE) -C $$d $@; done
+	@for d in $(TOYS); do $(MAKE) -C $$d $@ || exit $$?; done
 
 lint:
 	$(MAKE) cppcheck
