@@ -169,6 +169,11 @@ static bool g_ring_pointer_left_pending = false;
 #define WINDOW_HEIGHT 480
 
 #define GRAVITY 0.00014f
+/* A flick can reach window_w * 0.4 per frame and the speed multiplier goes to
+   SPEED_MAX, so one step can carry the ball roughly five window widths -- past
+   several walls, not just one. Each pass of the collision loop resolves one
+   reflection; the cap stops a window narrower than the ball from spinning. */
+#define MAX_WALL_PASSES_PER_STEP 8
 #define CANVAS_WIDTH 480.0f
 #define CANVAS_HEIGHT 270.0f
 #define FLOOR_Y_NORMALIZED 0.9f
@@ -2001,99 +2006,121 @@ static void update_ball_physics(float *ball_x, float *ball_y,
     float natural_vx = get_natural_vx(window_w);
     float vx_difference = *ball_vx - natural_vx;
     if (fabsf(vx_difference) > 0.01f) {
-        float damping_factor = 0.049f * time_scale_x;
+        /* A plain lerp towards natural_vx. On a slow frame at high speed the
+           coefficient passes 1.0 and the step lands on the far side, which
+           for a magnitude paired with a separate direction means the ball
+           turns round. Clamped, the worst case is arriving exactly. */
+        float damping_factor = clampf(0.049f * time_scale_x, 0.0f, 1.0f);
         *ball_vx -= vx_difference * damping_factor;
     } else {
         *ball_vx = natural_vx;
     }
 
-    if (*ball_x < border_inset) {
-        *ball_x = border_inset + (border_inset - *ball_x);
-        *ball_vx_direction = -*ball_vx_direction;
-        float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
-        uint64_t serial = surface_serials
-                              ? ++surface_serials[BOUNCE_SURFACE_LEFT]
-                              : 0;
-        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_LEFT,
-                               fabsf(*ball_vx), natural_vx);
-        if (predictive_pass) {
-            append_bounce_event(events, event_count, max_events, event_time,
-                                fabsf(*ball_vx), natural_vx,
-                                BOUNCE_SURFACE_LEFT, pan, serial);
-        } else {
-            maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(*ball_vx), natural_vx, pan);
+    for (int pass = 0; pass < MAX_WALL_PASSES_PER_STEP; pass++) {
+        if (*ball_x < border_inset) {
+            *ball_x = border_inset + (border_inset - *ball_x);
+            *ball_vx_direction = -*ball_vx_direction;
+            float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
+            uint64_t serial = surface_serials
+                                  ? ++surface_serials[BOUNCE_SURFACE_LEFT]
+                                  : 0;
+            audit_actual_collision(predictive_pass, BOUNCE_SURFACE_LEFT,
+                                   fabsf(*ball_vx), natural_vx);
+            if (predictive_pass) {
+                append_bounce_event(events, event_count, max_events, event_time,
+                                    fabsf(*ball_vx), natural_vx,
+                                    BOUNCE_SURFACE_LEFT, pan, serial);
+            } else {
+                maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(*ball_vx), natural_vx, pan);
+            }
+            continue;
         }
+        if (*ball_x + ball_diameter > window_w - border_inset) {
+            float right_edge = window_w - border_inset;
+            *ball_x = (right_edge - ball_diameter) - ((*ball_x + ball_diameter) - right_edge);
+            *ball_vx_direction = -*ball_vx_direction;
+            float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
+            uint64_t serial = surface_serials
+                                  ? ++surface_serials[BOUNCE_SURFACE_RIGHT]
+                                  : 0;
+            audit_actual_collision(predictive_pass, BOUNCE_SURFACE_RIGHT,
+                                   fabsf(*ball_vx), natural_vx);
+            if (predictive_pass) {
+                append_bounce_event(events, event_count, max_events, event_time,
+                                    fabsf(*ball_vx), natural_vx,
+                                    BOUNCE_SURFACE_RIGHT, pan, serial);
+            } else {
+                maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(*ball_vx), natural_vx, pan);
+            }
+            continue;
+        }
+        break;
     }
-    else if (*ball_x + ball_diameter > window_w - border_inset) {
-        float right_edge = window_w - border_inset;
-        *ball_x = (right_edge - ball_diameter) - ((*ball_x + ball_diameter) - right_edge);
-        *ball_vx_direction = -*ball_vx_direction;
-        float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
-        uint64_t serial = surface_serials
-                              ? ++surface_serials[BOUNCE_SURFACE_RIGHT]
-                              : 0;
-        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_RIGHT,
-                               fabsf(*ball_vx), natural_vx);
-        if (predictive_pass) {
-            append_bounce_event(events, event_count, max_events, event_time,
-                                fabsf(*ball_vx), natural_vx,
-                                BOUNCE_SURFACE_RIGHT, pan, serial);
-        } else {
-            maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(*ball_vx), natural_vx, pan);
+    /* Reflection cannot settle inside a span narrower than the ball, so the
+       loop above may run out of passes. Keep it on screen either way. */
+    *ball_x = clampf(*ball_x, border_inset,
+                     (float)window_w - border_inset - ball_diameter);
+
+    /* Same story vertically: ball_vy reaches 0.4 of the window per frame, so
+       a fast step can clear both the ceiling and the floor. */
+    for (int pass = 0; pass < MAX_WALL_PASSES_PER_STEP; pass++) {
+        if (*ball_y < border_inset_norm && *ball_vy < 0.0f) {
+            *ball_y = border_inset_norm + (border_inset_norm - *ball_y);
+            *ball_vy = -*ball_vy;
+            float impact_vy = fabsf(*ball_vy);
+            float ideal_vy = get_ideal_bounce_vy(ball_diameter_normalized, gravity);
+            float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
+            uint64_t serial = surface_serials
+                                  ? ++surface_serials[BOUNCE_SURFACE_CEILING]
+                                  : 0;
+            audit_actual_collision(predictive_pass, BOUNCE_SURFACE_CEILING,
+                                   impact_vy, ideal_vy);
+            if (predictive_pass) {
+                append_bounce_event(events, event_count, max_events, event_time,
+                                    impact_vy, ideal_vy,
+                                    BOUNCE_SURFACE_CEILING, pan, serial);
+            } else {
+                maybe_play_actual_bounce_sound(immediate_audio_pass, impact_vy, ideal_vy, pan);
+            }
+            continue;
         }
+
+        if ((*ball_y + ball_diameter_normalized >= g_floor_y_normalized) && (*ball_vy >= 0.0f)) {
+            float impact_vy = *ball_vy;
+            float penetration = (*ball_y + ball_diameter_normalized) - g_floor_y_normalized;
+            *ball_y = (g_floor_y_normalized - ball_diameter_normalized) - penetration;
+
+            *ball_vy = -*ball_vy;
+
+            float ideal_vy = get_ideal_bounce_vy(ball_diameter_normalized, gravity);
+
+            float vy_difference = fabsf(*ball_vy) - ideal_vy;
+            if (fabsf(vy_difference) > 0.0001f) {
+                float adjustment = vy_difference * 0.507f;
+                *ball_vy = -(fabsf(*ball_vy) - adjustment);
+            } else {
+                *ball_vy = -ideal_vy;
+            }
+
+            float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
+            uint64_t serial = surface_serials
+                                  ? ++surface_serials[BOUNCE_SURFACE_FLOOR]
+                                  : 0;
+            audit_actual_collision(predictive_pass, BOUNCE_SURFACE_FLOOR,
+                                   fabsf(impact_vy), ideal_vy);
+            if (predictive_pass) {
+                append_bounce_event(events, event_count, max_events, event_time,
+                                    fabsf(impact_vy), ideal_vy,
+                                    BOUNCE_SURFACE_FLOOR, pan, serial);
+            } else {
+                maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(impact_vy), ideal_vy, pan);
+            }
+            continue;
+        }
+        break;
     }
-
-    if (*ball_y < border_inset_norm && *ball_vy < 0.0f) {
-        *ball_y = border_inset_norm + (border_inset_norm - *ball_y);
-        *ball_vy = -*ball_vy;
-        float impact_vy = fabsf(*ball_vy);
-        float ideal_vy = get_ideal_bounce_vy(ball_diameter_normalized, gravity);
-        float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
-        uint64_t serial = surface_serials
-                              ? ++surface_serials[BOUNCE_SURFACE_CEILING]
-                              : 0;
-        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_CEILING,
-                               impact_vy, ideal_vy);
-        if (predictive_pass) {
-            append_bounce_event(events, event_count, max_events, event_time,
-                                impact_vy, ideal_vy,
-                                BOUNCE_SURFACE_CEILING, pan, serial);
-        } else {
-            maybe_play_actual_bounce_sound(immediate_audio_pass, impact_vy, ideal_vy, pan);
-        }
-    }
-
-    if ((*ball_y + ball_diameter_normalized >= g_floor_y_normalized) && (*ball_vy >= 0.0f)) {
-        float impact_vy = *ball_vy;
-        float penetration = (*ball_y + ball_diameter_normalized) - g_floor_y_normalized;
-        *ball_y = (g_floor_y_normalized - ball_diameter_normalized) - penetration;
-
-        *ball_vy = -*ball_vy;
-
-        float ideal_vy = get_ideal_bounce_vy(ball_diameter_normalized, gravity);
-
-        float vy_difference = fabsf(*ball_vy) - ideal_vy;
-        if (fabsf(vy_difference) > 0.0001f) {
-            float adjustment = vy_difference * 0.507f;
-            *ball_vy = -(fabsf(*ball_vy) - adjustment);
-        } else {
-            *ball_vy = -ideal_vy;
-        }
-
-        float pan = compute_bounce_pan(*ball_x, ball_diameter, window_w);
-        uint64_t serial = surface_serials
-                              ? ++surface_serials[BOUNCE_SURFACE_FLOOR]
-                              : 0;
-        audit_actual_collision(predictive_pass, BOUNCE_SURFACE_FLOOR,
-                               fabsf(impact_vy), ideal_vy);
-        if (predictive_pass) {
-            append_bounce_event(events, event_count, max_events, event_time,
-                                fabsf(impact_vy), ideal_vy,
-                                BOUNCE_SURFACE_FLOOR, pan, serial);
-        } else {
-            maybe_play_actual_bounce_sound(immediate_audio_pass, fabsf(impact_vy), ideal_vy, pan);
-        }
-    }
+    *ball_y = clampf(*ball_y, border_inset_norm,
+                     g_floor_y_normalized - ball_diameter_normalized);
 }
 
 

@@ -20,6 +20,89 @@ static int g_failures = 0;
     } while (0)
 
 /* ------------------------------------------------------------------ */
+/* Physics                                                             */
+/* ------------------------------------------------------------------ */
+
+#define TEST_WINDOW_W 1280
+#define TEST_WINDOW_H 720
+
+/* One integrator step with no audio and no event capture. */
+static void step_physics(float *x, float *y, float *vx, float *vy, int *dir,
+                         float diameter, double sim_delta) {
+    float diameter_norm = diameter / (float)TEST_WINDOW_H;
+    update_ball_physics(x, y, vx, vy, dir, TEST_WINDOW_W,
+                        0.0f, 0.0f, diameter, diameter_norm,
+                        sim_delta, false, false,
+                        NULL, NULL, NULL, 0, 0.0f);
+}
+
+/* A hard flick at maximum speed advances the ball several window widths in
+   one step. Reflecting once leaves it outside the opposite wall. */
+static void test_fast_ball_stays_in_window(void) {
+    g_speed_multiplier = SPEED_MAX;
+    g_floor_y_normalized = 1.0f;
+
+    const float diameter = 124.0f;
+    const float diameter_norm = diameter / (float)TEST_WINDOW_H;
+    float x = TEST_WINDOW_W * 0.5f;
+    float y = 0.5f;
+    float vx = (float)TEST_WINDOW_W * 0.4f;   /* the slingshot/flick cap */
+    float vy = 0.0f;
+    int dir = 1;
+
+    for (int i = 0; i < 240; i++) {
+        step_physics(&x, &y, &vx, &vy, &dir, diameter, 1.0 / 60.0);
+        CHECK(x >= 0.0f && x + diameter <= (float)TEST_WINDOW_W,
+              "step %d: ball_x %.1f outside [0, %d]", i, (double)x,
+              TEST_WINDOW_W - (int)diameter);
+        CHECK(y >= 0.0f && y + diameter_norm <= g_floor_y_normalized,
+              "step %d: ball_y %.4f outside [0, %.4f]", i, (double)y,
+              (double)(g_floor_y_normalized - diameter_norm));
+        if (g_failures) {
+            break;
+        }
+    }
+
+    g_speed_multiplier = 1.0f;
+}
+
+/* Horizontal damping pulls ball_vx towards natural_vx. It must converge on
+   it, never shoot past it: ball_vx is a magnitude, paired with a separate
+   direction, so a negative value inverts the ball's travel. */
+static void test_damping_does_not_overshoot(void) {
+    g_speed_multiplier = SPEED_MAX;
+    g_floor_y_normalized = 1.0f;
+
+    const float natural_vx = get_natural_vx(TEST_WINDOW_W);
+    const float diameter = 124.0f;
+    /* A 20 Hz frame at maximum speed -- inside the 15..240 Hz range the
+       frame pacer accepts. */
+    const double slow_frame = 1.0 / 20.0;
+
+    float x = TEST_WINDOW_W * 0.5f;
+    float y = 0.5f;
+    float vx = natural_vx * 8.0f;
+    float vy = 0.0f;
+    int dir = 1;
+
+    for (int i = 0; i < 60; i++) {
+        float before = vx;
+        step_physics(&x, &y, &vx, &vy, &dir, diameter, slow_frame);
+        CHECK(vx >= 0.0f, "step %d: ball_vx went negative (%.3f)", i, (double)vx);
+        if (before > natural_vx) {
+            CHECK(vx >= natural_vx - 0.001f,
+                  "step %d: ball_vx %.3f undershot natural_vx %.3f from %.3f",
+                  i, (double)vx, (double)natural_vx, (double)before);
+        }
+        if (g_failures) {
+            break;
+        }
+    }
+
+    g_speed_multiplier = 1.0f;
+}
+
+/* ------------------------------------------------------------------ */
 /* Regeneration lifecycle                                              */
 /* ------------------------------------------------------------------ */
 
@@ -128,6 +211,8 @@ static void test_regen_survives_worker_failure(void) {
 int main(void) {
     srandom(1);
 
+    test_fast_ball_stays_in_window();
+    test_damping_does_not_overshoot();
     test_regen_shutdown_joins_workers();
     test_color_change_joins_before_palette();
     test_regen_survives_worker_failure();
